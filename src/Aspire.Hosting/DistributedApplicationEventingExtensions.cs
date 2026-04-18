@@ -88,6 +88,19 @@ public static class DistributedApplicationEventingExtensions
         => builder.OnResourceEvent(callback);
 
     /// <summary>
+    /// Subscribes a callback to the <see cref="ConnectionStringChangedEvent"/> event for <paramref name="builder"/>.
+    /// </summary>
+    /// <typeparam name="T">The resource type.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="callback">A callback to handle the event.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>This method is not available in polyglot app hosts.</remarks>
+    [AspireExportIgnore(Reason = "Complex generic delegates with event/CancellationToken types — not ATS-compatible.")]
+    public static IResourceBuilder<T> OnConnectionStringChanged<T>(this IResourceBuilder<T> builder, Func<T, ConnectionStringAvailableEvent, CancellationToken, Task> callback)
+        where T : IResourceWithConnectionString
+        => builder.OnResourceEvent(callback);
+
+    /// <summary>
     /// Subscribes a callback to the <see cref="InitializeResourceEvent"/> event for <paramref name="builder"/>.
     /// </summary>
     /// <typeparam name="T">The resource type.</typeparam>

@@ -69,6 +69,7 @@ internal sealed class ApplicationOrchestrator
         dcpExecutorEvents.Subscribe<OnEndpointsAllocatedContext>(OnEndpointsAllocated);
         dcpExecutorEvents.Subscribe<OnResourceStartingContext>(OnResourceStarting);
         dcpExecutorEvents.Subscribe<OnConnectionStringAvailableContext>(OnConnectionStringAvailable);
+        dcpExecutorEvents.Subscribe<OnConnectionStringChangedContext>(OnConnectionStringChanged);
         dcpExecutorEvents.Subscribe<OnResourceFailedToStartContext>(OnResourceFailedToStart);
 
         _eventing.Subscribe<ResourceEndpointsAllocatedEvent>(OnResourceEndpointsAllocated);
@@ -213,6 +214,11 @@ internal sealed class ApplicationOrchestrator
     private async Task OnConnectionStringAvailable(OnConnectionStringAvailableContext context)
     {
         await PublishConnectionStringAvailableEvent(context.Resource, context.CancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task OnConnectionStringChanged(OnConnectionStringChangedContext context)
+    {
+        await PublishConnectionStringChangedEvent(context.Resource, context.CancellationToken).ConfigureAwait(false);
     }
 
     private async Task ProcessResourceUrlCallbacks(IResource resource, CancellationToken cancellationToken)
@@ -685,6 +691,32 @@ internal sealed class ApplicationOrchestrator
                 }
 
                 await PublishConnectionStringAvailableEvent(child, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task PublishConnectionStringChangedEvent(IResource resource, CancellationToken cancellationToken)
+    {
+        // If the resource itself has a connection string then publish that the connection string has changed.
+        if (resource is IResourceWithConnectionString)
+        {
+            var connectionStringChangedEvent = new ConnectionStringChangedEvent(resource, _serviceProvider);
+            await _eventing.PublishAsync(connectionStringChangedEvent, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Sometimes the container/executable itself does not have a connection string, and in those cases
+        // we need to dispatch the event for the children.
+        if (_parentChildLookup[resource] is { } children)
+        {
+            // only dispatch the event for children that have a connection string and are IResourceWithParent, not parented by annotations.
+            foreach (var child in children.OfType<IResourceWithConnectionString>().Where(c => c is IResourceWithParent))
+            {
+                if (ResourceHasOwnLifetime(child))
+                {
+                    continue;
+                }
+
+                await PublishConnectionStringChangedEvent(child, cancellationToken).ConfigureAwait(false);
             }
         }
     }

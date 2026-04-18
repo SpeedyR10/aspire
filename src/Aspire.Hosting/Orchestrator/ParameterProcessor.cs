@@ -8,6 +8,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Aspire.Dashboard.Model;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Dcp;
 using Aspire.Hosting.Pipelines;
 using Aspire.Hosting.Resources;
 using Microsoft.Extensions.Logging;
@@ -598,5 +599,9 @@ public sealed class ParameterProcessor(
                 State = state
             };
         }).ConfigureAwait(false);
+
+        await dcpExecutorEvents.PublishAsync(
+            new OnConnectionStringChangedContext(CancellationToken.None, parameterResource)
+        ).ConfigureAwait(false);
     }
 }
