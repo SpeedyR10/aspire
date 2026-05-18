@@ -5,6 +5,7 @@
 #pragma warning disable ASPIRECONTAINERRUNTIME001
 
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Aspire.Hosting.Publishing;
@@ -15,7 +16,7 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
     {
     }
 
-    protected override string RuntimeExecutable => "docker";
+    protected override string RuntimeExecutable => KnownContainerRuntimes.Docker;
     public override string Name => "Docker";
     private async Task RunDockerBuildAsync(string contextPath, string dockerfilePath, ContainerImageBuildOptions? options, Dictionary<string, string?> buildArguments, Dictionary<string, BuildImageSecretValue> buildSecrets, string? stage, CancellationToken cancellationToken)
     {
@@ -96,24 +97,22 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
                 }
             }
 
-            var buildOutput = new BuildOutputCapture();
-
-            var exitCode = await ExecuteContainerCommandWithExitCodeAsync(
+            var processResult = await ExecuteContainerCommandWithResultAsync(
                 arguments,
                 "Docker build for {ImageName} failed with exit code {ExitCode}.",
                 "Docker build for {ImageName} succeeded.",
                 cancellationToken,
                 new object[] { imageName },
                 environmentVariables,
-                buildOutput).ConfigureAwait(false);
+                retainOutput: true).ConfigureAwait(false);
 
-            if (exitCode != 0)
+            if (processResult.ExitCode != 0)
             {
                 throw new ProcessFailedException(
-                    $"Docker build failed with exit code {exitCode}.",
-                    exitCode,
-                    buildOutput.ToArray(),
-                    buildOutput.TotalLineCount);
+                    $"Docker build failed with exit code {processResult.ExitCode}.",
+                    processResult.ExitCode,
+                    processResult.ProcessOutput,
+                    processResult.TotalProcessOutputLineCount);
             }
         }
         finally
@@ -194,23 +193,21 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
     private async Task CreateBuildkitInstanceAsync(string builderName, CancellationToken cancellationToken)
     {
         var arguments = $"buildx create --name \"{builderName}\" --driver docker-container";
-        var buildOutput = new BuildOutputCapture();
-
-        var exitCode = await ExecuteContainerCommandWithExitCodeAsync(
+        var processResult = await ExecuteContainerCommandWithResultAsync(
             arguments,
             "Failed to create buildkit instance {BuilderName} with exit code {ExitCode}.",
             "Successfully created buildkit instance {BuilderName}.",
             cancellationToken,
             new object[] { builderName },
-            outputBuffer: buildOutput).ConfigureAwait(false);
+            retainOutput: true).ConfigureAwait(false);
 
-        if (exitCode != 0)
+        if (processResult.ExitCode != 0)
         {
             throw new ProcessFailedException(
-                $"Failed to create buildkit instance '{builderName}' with exit code {exitCode}.",
-                exitCode,
-                buildOutput.ToArray(),
-                buildOutput.TotalLineCount);
+                $"Failed to create buildkit instance '{builderName}' with exit code {processResult.ExitCode}.",
+                processResult.ExitCode,
+                processResult.ProcessOutput,
+                processResult.TotalProcessOutputLineCount);
         }
     }
 

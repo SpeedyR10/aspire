@@ -10,6 +10,7 @@ using System.Security.Cryptography.X509Certificates;
 using Aspire.Dashboard.Model;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Ats;
+using Aspire.Hosting.Dcp.Process;
 using Aspire.Hosting.Publishing;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.DependencyInjection;
@@ -141,25 +142,6 @@ public static class ResourceBuilderExtensions
         });
     }
 
-    // Keep these ATS-only aliases for backward compatibility with existing polyglot app hosts.
-    // Remove them once callers have migrated to the unified withEnvironment(...) export.
-    // Tracking issue: https://github.com/microsoft/aspire/issues/15734
-    /// <summary>
-    /// Obsolete ATS alias for <see cref="WithEnvironment{T}(IResourceBuilder{T}, string, ReferenceExpression)"/>.
-    /// </summary>
-    /// <typeparam name="T">The resource type.</typeparam>
-    /// <param name="builder">The resource builder.</param>
-    /// <param name="name">The name of the environment variable.</param>
-    /// <param name="value">The reference expression value.</param>
-    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [Obsolete("ATS compatibility shim. Use withEnvironment instead.")]
-    [AspireExport("withEnvironmentExpression", Description = "Sets an environment variable from a reference expression")]
-    internal static IResourceBuilder<T> WithEnvironmentExpressionShim<T>(this IResourceBuilder<T> builder, string name, ReferenceExpression value)
-        where T : IResourceWithEnvironment
-    {
-        return builder.WithEnvironment(name, value);
-    }
-
     /// <summary>
     /// Adds an environment variable to the resource.
     /// </summary>
@@ -236,22 +218,6 @@ public static class ResourceBuilderExtensions
     }
 
     /// <summary>
-    /// Obsolete ATS alias for <see cref="WithEnvironment{T}(IResourceBuilder{T}, string, EndpointReference)"/>.
-    /// </summary>
-    /// <typeparam name="T">The resource type.</typeparam>
-    /// <param name="builder">The resource builder.</param>
-    /// <param name="name">The name of the environment variable.</param>
-    /// <param name="endpointReference">The endpoint reference value.</param>
-    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [Obsolete("ATS compatibility shim. Use withEnvironment instead.")]
-    [AspireExport("withEnvironmentEndpoint", Description = "Sets an environment variable from an endpoint reference")]
-    internal static IResourceBuilder<T> WithEnvironmentEndpointShim<T>(this IResourceBuilder<T> builder, string name, EndpointReference endpointReference)
-        where T : IResourceWithEnvironment
-    {
-        return builder.WithEnvironment(name, endpointReference);
-    }
-
-    /// <summary>
     /// Adds an environment variable to the resource with the URL from the <see cref="ExternalServiceResource"/>.
     /// </summary>
     /// <typeparam name="T">The resource type.</typeparam>
@@ -318,22 +284,6 @@ public static class ResourceBuilderExtensions
     }
 
     /// <summary>
-    /// Obsolete ATS alias for <see cref="WithEnvironment{T}(IResourceBuilder{T}, string, IResourceBuilder{ParameterResource})"/>.
-    /// </summary>
-    /// <typeparam name="T">The resource type.</typeparam>
-    /// <param name="builder">The resource builder.</param>
-    /// <param name="name">The name of the environment variable.</param>
-    /// <param name="parameter">The parameter resource builder.</param>
-    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [Obsolete("ATS compatibility shim. Use withEnvironment instead.")]
-    [AspireExport("withEnvironmentParameter", Description = "Sets an environment variable from a parameter resource")]
-    internal static IResourceBuilder<T> WithEnvironmentParameterShim<T>(this IResourceBuilder<T> builder, string name, IResourceBuilder<ParameterResource> parameter)
-        where T : IResourceWithEnvironment
-    {
-        return builder.WithEnvironment(name, parameter);
-    }
-
-    /// <summary>
     /// Adds an environment variable to the resource with the connection string from the referenced resource.
     /// </summary>
     /// <typeparam name="T">The destination resource type.</typeparam>
@@ -358,25 +308,6 @@ public static class ResourceBuilderExtensions
         {
             context.EnvironmentVariables[envVarName] = new ConnectionStringReference(resource.Resource, optional: false);
         });
-    }
-
-    /// <summary>
-    /// Obsolete ATS alias for <see cref="WithEnvironment{T}(IResourceBuilder{T}, string, IResourceBuilder{IResourceWithConnectionString})"/>.
-    /// </summary>
-    /// <typeparam name="T">The destination resource type.</typeparam>
-    /// <param name="builder">The destination resource builder.</param>
-    /// <param name="envVarName">The name of the environment variable.</param>
-    /// <param name="resource">The referenced connection string resource builder.</param>
-    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [Obsolete("ATS compatibility shim. Use withEnvironment instead.")]
-    [AspireExport("withEnvironmentConnectionString", Description = "Sets an environment variable from a connection string resource")]
-    internal static IResourceBuilder<T> WithEnvironmentConnectionStringShim<T>(
-        this IResourceBuilder<T> builder,
-        string envVarName,
-        IResourceBuilder<IResourceWithConnectionString> resource)
-        where T : IResourceWithEnvironment
-    {
-        return builder.WithEnvironment(envVarName, resource);
     }
 
     /// <summary>
@@ -534,7 +465,7 @@ public static class ResourceBuilderExtensions
     /// <param name="name">The name of the connection property to add.</param>
     /// <param name="value">The string value to assign to the connection property.</param>
     /// <returns>The same resource builder instance with the specified connection property annotation applied.</returns>
-    [AspireExport("withConnectionPropertyValue", Description = "Adds a connection property with a string value")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the unified withConnectionProperty export.")]
     internal static IResourceBuilder<T> WithConnectionPropertyValueExport<T>(
         this IResourceBuilder<T> builder,
         string name,
@@ -778,6 +709,31 @@ public static class ResourceBuilderExtensions
     [AspireExport(Description = "Adds a reference to another resource")]
     internal static IResourceBuilder<TDestination> WithReference<TDestination>(
         this IResourceBuilder<TDestination> builder,
+        [AspireUnion(typeof(IResourceBuilder<IResource>), typeof(EndpointReference), typeof(string), typeof(Uri))] object source,
+        string? connectionName = null,
+        bool optional = false,
+        string? name = null)
+        where TDestination : IResourceWithEnvironment
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(source);
+
+        return source switch
+        {
+            IResourceBuilder<IResource> resourceBuilder => WithReferenceResource(builder, resourceBuilder, connectionName, optional, name),
+            EndpointReference endpointReference when connectionName is null && !optional && name is null => builder.WithReference(endpointReference),
+            EndpointReference => throw new InvalidOperationException("Endpoint references do not support connectionName, optional, or name options."),
+            Uri uri when connectionName is null && !optional && name is not null => builder.WithReference(name, uri),
+            Uri => throw new InvalidOperationException("URI references require the name option and do not support connectionName or optional."),
+            string uriString when connectionName is null && !optional && name is not null => builder.WithReference(name, CreateUri(uriString)),
+            string => throw new InvalidOperationException("URI references require the name option and do not support connectionName or optional."),
+            _ => throw new ArgumentException("Source must be a resource builder, endpoint reference, or URI string.", nameof(source))
+        };
+    }
+
+    // Preserve the historical dispatcher signature for internal reflection-based tests.
+    internal static IResourceBuilder<TDestination> WithReference<TDestination>(
+        this IResourceBuilder<TDestination> builder,
         IResourceBuilder<IResource> source,
         string? connectionName = null,
         bool optional = false,
@@ -787,6 +743,17 @@ public static class ResourceBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(source);
 
+        return WithReferenceResource(builder, source, connectionName, optional, name);
+    }
+
+    private static IResourceBuilder<TDestination> WithReferenceResource<TDestination>(
+        IResourceBuilder<TDestination> builder,
+        IResourceBuilder<IResource> source,
+        string? connectionName,
+        bool optional,
+        string? name)
+        where TDestination : IResourceWithEnvironment
+    {
         if (TryDispatchCustomWithReference(builder, source, connectionName, optional, name, out var customDispatch))
         {
             return customDispatch;
@@ -848,6 +815,16 @@ public static class ResourceBuilderExtensions
         }
 
         throw new InvalidOperationException($"The resource '{source.Resource.Name}' can't be used with withReference because it doesn't provide a connection string, service discovery, or a custom withReference implementation.");
+    }
+
+    private static Uri CreateUri(string uriString)
+    {
+        if (!Uri.TryCreate(uriString, UriKind.RelativeOrAbsolute, out var uri))
+        {
+            throw new InvalidOperationException($"The URI '{uriString}' is invalid.");
+        }
+
+        return uri;
     }
 
     private static bool TryDispatchCustomWithReference<TDestination>(
@@ -1074,7 +1051,7 @@ public static class ResourceBuilderExtensions
     /// <param name="name">The name of the service.</param>
     /// <param name="uri">The uri of the service.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [AspireExport("withReferenceUri", Description = "Adds a reference to a URI")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the generic withReference dispatcher export.")]
     public static IResourceBuilder<TDestination> WithReference<TDestination>(this IResourceBuilder<TDestination> builder, string name, Uri uri)
         where TDestination : IResourceWithEnvironment
     {
@@ -1127,7 +1104,7 @@ public static class ResourceBuilderExtensions
     /// <param name="builder">The resource where the service discovery information will be injected.</param>
     /// <param name="externalService">The external service.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [AspireExport("withReferenceExternalService", Description = "Adds a reference to an external service")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts can use the generic withReference dispatcher with an ExternalServiceResource builder.")]
     public static IResourceBuilder<TDestination> WithReference<TDestination>(this IResourceBuilder<TDestination> builder, IResourceBuilder<ExternalServiceResource> externalService)
         where TDestination : IResourceWithEnvironment
     {
@@ -1203,7 +1180,7 @@ public static class ResourceBuilderExtensions
     /// <param name="builder">The resource where the service discovery information will be injected.</param>
     /// <param name="endpointReference">The endpoint from which to extract the url.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [AspireExport("withReferenceEndpoint", Description = "Adds a reference to an endpoint")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the generic withReference dispatcher export.")]
     public static IResourceBuilder<TDestination> WithReference<TDestination>(this IResourceBuilder<TDestination> builder, EndpointReference endpointReference)
         where TDestination : IResourceWithEnvironment
     {
@@ -1663,7 +1640,7 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("withUrlsCallback", Description = "Customizes displayed URLs via callback")]
+    [AspireExport(Description = "Customizes displayed URLs via callback")]
     public static IResourceBuilder<T> WithUrls<T>(this IResourceBuilder<T> builder, Action<ResourceUrlsCallbackContext> callback)
         where T : IResource
     {
@@ -1725,7 +1702,7 @@ public static class ResourceBuilderExtensions
     ///                       .WithUrl("/home", "Home");
     /// </code>
     /// </example>
-    [AspireExport(Description = "Adds or modifies displayed URLs")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withUrl dispatcher export.")]
     public static IResourceBuilder<T> WithUrl<T>(this IResourceBuilder<T> builder, string url, string? displayText = null)
         where T : IResource
     {
@@ -1751,6 +1728,24 @@ public static class ResourceBuilderExtensions
 
         // Treat as a static URL
         return builder.WithAnnotation(new ResourceUrlAnnotation { Url = url, DisplayText = displayText });
+    }
+
+    [AspireExport("withUrl", Description = "Adds or modifies displayed URLs")]
+    internal static IResourceBuilder<T> WithUrlForPolyglot<T>(
+        this IResourceBuilder<T> builder,
+        [AspireUnion(typeof(string), typeof(ReferenceExpression))] object url,
+        string? displayText = null)
+        where T : IResource
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(url);
+
+        return url switch
+        {
+            string urlString => builder.WithUrl(urlString, displayText),
+            ReferenceExpression expression => builder.WithUrl(expression, displayText),
+            _ => throw new ArgumentException("URL must be a string or a reference expression.", nameof(url))
+        };
     }
 
     /// <summary>
@@ -1789,7 +1784,7 @@ public static class ResourceBuilderExtensions
     /// Use this method to add a URL to be displayed for the resource.<br/>
     /// Note that any endpoints on the resource will automatically get a corresponding URL added for them.
     /// </remarks>
-    [AspireExport("withUrlExpression", Description = "Adds a URL using a reference expression")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withUrl dispatcher export.")]
     public static IResourceBuilder<T> WithUrl<T>(this IResourceBuilder<T> builder, ReferenceExpression url, string? displayText = null)
         where T : IResource
     {
@@ -1892,7 +1887,7 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("withUrlForEndpointFactory", Description = "Adds a URL for a specific endpoint via factory callback")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the Action<ResourceUrlAnnotation> overload for withUrlForEndpoint.")]
     public static IResourceBuilder<T> WithUrlForEndpoint<T>(this IResourceBuilder<T> builder, string endpointName, Func<EndpointReference, ResourceUrlAnnotation> callback)
         where T : IResourceWithEndpoints
     {
@@ -2025,13 +2020,27 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("waitForResource", MethodName = "waitFor", Description = "Waits for another resource to be ready")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal waitFor dispatcher export.")]
     public static IResourceBuilder<T> WaitFor<T>(this IResourceBuilder<T> builder, IResourceBuilder<IResource> dependency) where T : IResourceWithWaitSupport
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(dependency);
 
         return WaitForCore(builder, dependency, waitBehavior: null, addRelationship: true);
+    }
+
+    [AspireExport("waitFor", Description = "Waits for another resource to be ready")]
+    internal static IResourceBuilder<T> WaitForForPolyglot<T>(
+        this IResourceBuilder<T> builder,
+        IResourceBuilder<IResource> dependency,
+        WaitBehavior? waitBehavior = null) where T : IResourceWithWaitSupport
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(dependency);
+
+        return waitBehavior is null
+            ? builder.WaitFor(dependency)
+            : builder.WaitFor(dependency, waitBehavior.Value);
     }
 
     /// <summary>
@@ -2068,7 +2077,7 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("waitForWithBehavior", Description = "Waits for another resource with specific behavior")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal waitFor dispatcher export.")]
     public static IResourceBuilder<T> WaitFor<T>(this IResourceBuilder<T> builder, IResourceBuilder<IResource> dependency, WaitBehavior waitBehavior) where T : IResourceWithWaitSupport
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -2133,13 +2142,27 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("waitForResourceStart", MethodName = "waitForStart", Description = "Waits for another resource to start")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal waitForStart dispatcher export.")]
     public static IResourceBuilder<T> WaitForStart<T>(this IResourceBuilder<T> builder, IResourceBuilder<IResource> dependency) where T : IResourceWithWaitSupport
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(dependency);
 
         return WaitForStartCore(builder, dependency, waitBehavior: null, addRelationship: true);
+    }
+
+    [AspireExport("waitForStart", Description = "Waits for another resource to start")]
+    internal static IResourceBuilder<T> WaitForStartForPolyglot<T>(
+        this IResourceBuilder<T> builder,
+        IResourceBuilder<IResource> dependency,
+        WaitBehavior? waitBehavior = null) where T : IResourceWithWaitSupport
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(dependency);
+
+        return waitBehavior is null
+            ? builder.WaitForStart(dependency)
+            : builder.WaitForStart(dependency, waitBehavior.Value);
     }
 
     /// <summary>
@@ -2174,7 +2197,7 @@ public static class ResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("waitForStartWithBehavior", Description = "Waits for another resource to start with specific behavior")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal waitForStart dispatcher export.")]
     public static IResourceBuilder<T> WaitForStart<T>(this IResourceBuilder<T> builder, IResourceBuilder<IResource> dependency, WaitBehavior waitBehavior) where T : IResourceWithWaitSupport
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -2546,6 +2569,8 @@ public static class ResourceBuilderExtensions
         ArgumentNullException.ThrowIfNull(executeCommand);
 
         commandOptions ??= CommandOptions.Default;
+#pragma warning disable ASPIREINTERACTION001 // Command arguments intentionally reuse the experimental interaction input model.
+        ValidateCommandArguments(commandOptions.Arguments);
 
         // Replace existing annotation with the same name.
         var existingAnnotation = builder.Resource.Annotations.OfType<ResourceCommandAnnotation>().SingleOrDefault(a => a.Name == name);
@@ -2554,7 +2579,10 @@ public static class ResourceBuilderExtensions
             builder.Resource.Annotations.Remove(existingAnnotation);
         }
 
-        return builder.WithAnnotation(new ResourceCommandAnnotation(name, displayName, commandOptions.UpdateState ?? (c => ResourceCommandState.Enabled), executeCommand, commandOptions.Description, commandOptions.Parameter, commandOptions.ConfirmationMessage, commandOptions.IconName, commandOptions.IconVariant, commandOptions.IsHighlighted));
+#pragma warning disable CS0618 // Parameter is obsolete but still flowed for compatibility.
+        return builder.WithAnnotation(new ResourceCommandAnnotation(name, displayName, commandOptions.UpdateState ?? (c => ResourceCommandState.Enabled), executeCommand, commandOptions.Description, commandOptions.Parameter, commandOptions.Arguments, commandOptions.ConfirmationMessage, commandOptions.IconName, commandOptions.IconVariant, commandOptions.IsHighlighted, commandOptions.Visibility, commandOptions.ValidateArguments));
+#pragma warning restore CS0618
+#pragma warning restore ASPIREINTERACTION001
     }
 
     /// <summary>
@@ -2619,8 +2647,505 @@ public static class ResourceBuilderExtensions
             builder.Resource.Annotations.Remove(existingAnnotation);
         }
 
+#pragma warning disable ASPIREINTERACTION001 // The obsolete overload still flows the obsolete parameter for compatibility.
         return builder.WithAnnotation(new ResourceCommandAnnotation(name, displayName, updateState ?? (c => ResourceCommandState.Enabled), executeCommand, displayDescription, parameter, confirmationMessage, iconName, iconVariant, isHighlighted));
+#pragma warning restore ASPIREINTERACTION001
     }
+
+#pragma warning disable ASPIREINTERACTION001 // Command arguments reuse interaction input metadata.
+    private static void ValidateCommandArguments(IReadOnlyList<InteractionInput> arguments)
+    {
+        _ = new InteractionInputCollection(arguments);
+    }
+#pragma warning restore ASPIREINTERACTION001
+
+    #pragma warning disable ASPIREPROCESSCOMMAND001 // Process command APIs are experimental.
+
+    /// <summary>
+    /// Adds a command to the resource that starts a local process when invoked.
+    /// </summary>
+    /// <typeparam name="TResource">The type of the resource.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="commandName">The name of command. The name uniquely identifies the command.</param>
+    /// <param name="displayName">The display name visible in UI.</param>
+    /// <param name="executablePath">The executable path or command name to start.</param>
+    /// <param name="arguments">The command-line arguments for the process.</param>
+    /// <param name="commandOptions">Optional configuration for the command.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// The command will be added to the resource represented by <paramref name="builder"/>. When the command executes,
+    /// the process is started inside the AppHost process. Standard output and standard error are streamed to the
+    /// command logger and a bounded tail of the combined output is returned as command result data.
+    /// </para>
+    /// <para>This C# overload is not exported to polyglot app hosts. Use the language-specific static process command API instead.</para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var redis = builder.AddRedis("cache")
+    ///     .WithProcessCommand("dotnet-version", "Show .NET version", "dotnet", ["--version"]);
+    /// </code>
+    /// </example>
+    [Experimental("ASPIREPROCESSCOMMAND001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Process commands start local processes from AppHost callbacks and cannot be represented in polyglot app hosts.")]
+    public static IResourceBuilder<TResource> WithProcessCommand<TResource>(
+        this IResourceBuilder<TResource> builder,
+        string commandName,
+        string displayName,
+        string executablePath,
+        IReadOnlyList<string>? arguments = null,
+        ProcessCommandOptions? commandOptions = null)
+        where TResource : IResource
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
+        var processArguments = arguments?.ToArray() ?? [];
+
+        return builder.WithProcessCommand(
+            commandName,
+            displayName,
+            _ => new ProcessCommandSpec(executablePath)
+            {
+                Arguments = processArguments
+            },
+            commandOptions);
+    }
+
+    /// <summary>
+    /// Adds a command to the resource that starts a local process when invoked.
+    /// </summary>
+    /// <typeparam name="TResource">The type of the resource.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="commandName">The name of command. The name uniquely identifies the command.</param>
+    /// <param name="displayName">The display name visible in UI.</param>
+    /// <param name="processSpecFactory">A callback that creates the local process specification when the command is invoked.</param>
+    /// <param name="commandOptions">Optional configuration for the command.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// The command will be added to the resource represented by <paramref name="builder"/>. When the command executes,
+    /// <paramref name="processSpecFactory"/> is called inside the AppHost process with the command execution context.
+    /// Use <see cref="ExecuteCommandContext.Arguments"/> to read values supplied by the command caller.
+    /// </para>
+    /// <para>
+    /// Standard output and standard error are streamed to the command logger at <see cref="LogLevel.Debug"/> and a bounded tail
+    /// of the combined output is returned as command result data. Configure <see cref="ProcessCommandOptions.SuccessExitCodes"/>
+    /// to control which exit codes are treated as success. Configure <see cref="ProcessCommandOptions.MaxOutputLineCount"/>
+    /// to control the number of returned output lines. Configure <see cref="ProcessCommandOptions.DisplayImmediately"/> to
+    /// control whether returned output opens automatically in the dashboard. Configure <see cref="ProcessCommandOptions.GetCommandResult"/>
+    /// to create a custom command result from the process exit code and output.
+    /// </para>
+    /// <para>This C# callback overload is not available in polyglot app hosts.</para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var redis = builder.AddRedis("cache")
+    ///     .WithProcessCommand(
+    ///         "seed-data",
+    ///         "Seed data",
+    ///         context => new ProcessCommandSpec("dotnet")
+    ///         {
+    ///             Arguments = ["run", "--project", "tools/SeedData", "--", context.Arguments.GetString("dataset") ?? "small"],
+    ///             EnvironmentVariables = { ["ConnectionStrings__db"] = "Host=localhost;Database=db" }
+    ///         },
+    ///         new ProcessCommandOptions { MaxOutputLineCount = 20 });
+    /// </code>
+    /// </example>
+    [Experimental("ASPIREPROCESSCOMMAND001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Process command factories are C# callbacks and cannot be represented in polyglot app hosts.")]
+    public static IResourceBuilder<TResource> WithProcessCommand<TResource>(
+        this IResourceBuilder<TResource> builder,
+        string commandName,
+        string displayName,
+        Func<ExecuteCommandContext, ProcessCommandSpec> processSpecFactory,
+        ProcessCommandOptions? commandOptions = null)
+        where TResource : IResource
+    {
+        ArgumentNullException.ThrowIfNull(processSpecFactory);
+
+        return builder.WithProcessCommand(
+            commandName,
+            displayName,
+            context => new ValueTask<ProcessCommandSpec>(processSpecFactory(context)),
+            commandOptions);
+    }
+
+    /// <summary>
+    /// Adds a command to the resource that starts a local process when invoked.
+    /// </summary>
+    /// <typeparam name="TResource">The type of the resource.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="commandName">The name of command. The name uniquely identifies the command.</param>
+    /// <param name="displayName">The display name visible in UI.</param>
+    /// <param name="processSpecFactory">A callback that creates the local process specification when the command is invoked.</param>
+    /// <param name="commandOptions">Optional configuration for the command.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// The command will be added to the resource represented by <paramref name="builder"/>. When the command executes,
+    /// <paramref name="processSpecFactory"/> is called inside the AppHost process with the command execution context.
+    /// Use <see cref="ExecuteCommandContext.Arguments"/> to read values supplied by the command caller.
+    /// </para>
+    /// <para>
+    /// Standard output and standard error are streamed to the command logger at <see cref="LogLevel.Debug"/> and a bounded tail
+    /// of the combined output is returned as command result data. Configure <see cref="ProcessCommandOptions.SuccessExitCodes"/>
+    /// to control which exit codes are treated as success. Configure <see cref="ProcessCommandOptions.MaxOutputLineCount"/>
+    /// to control the number of returned output lines. Configure <see cref="ProcessCommandOptions.DisplayImmediately"/> to
+    /// control whether returned output opens automatically in the dashboard. Configure <see cref="ProcessCommandOptions.GetCommandResult"/>
+    /// to create a custom command result from the process exit code and output.
+    /// </para>
+    /// <para>This C# callback overload is not available in polyglot app hosts.</para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var redis = builder.AddRedis("cache")
+    ///     .WithProcessCommand(
+    ///         "seed-data",
+    ///         "Seed data",
+    ///         context => new ValueTask&lt;ProcessCommandSpec&gt;(new ProcessCommandSpec("dotnet")
+    ///         {
+    ///             Arguments = ["run", "--project", "tools/SeedData", "--", context.Arguments.GetString("dataset") ?? "small"],
+    ///             StandardInputContent = "seed"
+    ///         }));
+    /// </code>
+    /// </example>
+    [Experimental("ASPIREPROCESSCOMMAND001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Process command factories are C# callbacks and cannot be represented in polyglot app hosts.")]
+    public static IResourceBuilder<TResource> WithProcessCommand<TResource>(
+        this IResourceBuilder<TResource> builder,
+        string commandName,
+        string displayName,
+        Func<ExecuteCommandContext, ValueTask<ProcessCommandSpec>> processSpecFactory,
+        ProcessCommandOptions? commandOptions = null)
+        where TResource : IResource
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(commandName);
+        ArgumentNullException.ThrowIfNull(displayName);
+        ArgumentNullException.ThrowIfNull(processSpecFactory);
+
+        commandOptions ??= ProcessCommandOptions.Default;
+
+        builder.WithCommand(
+            commandName,
+            displayName,
+            async context =>
+            {
+                try
+                {
+                    var processCommandSpec = await processSpecFactory(context).ConfigureAwait(false)
+                        ?? throw new InvalidOperationException("The process command specification factory returned null.");
+
+                    return await ExecuteProcessCommandAsync(context, processCommandSpec, commandOptions).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return CommandResults.Canceled();
+                }
+                catch (Exception ex)
+                {
+                    return CommandResults.Failure(ex);
+                }
+            },
+            commandOptions);
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Adds a command to the resource that starts a local process when invoked.
+    /// </summary>
+    [Experimental("ASPIREPROCESSCOMMAND001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExport("withProcessCommand", Description = "Adds a process resource command")]
+    internal static IResourceBuilder<TResource> WithProcessCommandExport<TResource>(
+        this IResourceBuilder<TResource> builder,
+        string commandName,
+        string displayName,
+        ProcessCommandExportOptions options)
+        where TResource : IResource
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        return builder.WithProcessCommand(
+            commandName,
+            displayName,
+            _ => CreateProcessCommandSpec(options),
+            CreateProcessCommandOptions(options));
+    }
+
+    /// <summary>
+    /// Adds a command to the resource that starts a local process created by a callback when invoked.
+    /// </summary>
+    [Experimental("ASPIREPROCESSCOMMAND001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExport("withProcessCommandFactory", Description = "Adds a process resource command via callback")]
+    internal static IResourceBuilder<TResource> WithProcessCommandFactoryExport<TResource>(
+        this IResourceBuilder<TResource> builder,
+        string commandName,
+        string displayName,
+        Func<ExecuteCommandContext, Task<ProcessCommandSpecExportData>> createProcessSpec,
+        ProcessCommandResultExportOptions? options = null)
+        where TResource : IResource
+    {
+        ArgumentNullException.ThrowIfNull(createProcessSpec);
+
+        return builder.WithProcessCommand(
+            commandName,
+            displayName,
+            async context =>
+            {
+                var processCommandSpec = await createProcessSpec(context).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The process command specification factory returned null.");
+
+                return CreateProcessCommandSpec(processCommandSpec);
+            },
+            CreateProcessCommandOptions(options));
+    }
+
+    internal static async Task<ExecuteCommandResult> ExecuteProcessCommandAsync(ExecuteCommandContext context, ProcessCommandSpec processCommandSpec, ProcessCommandOptions commandOptions)
+    {
+        var processSpec = CreateProcessSpec(context, processCommandSpec, commandOptions);
+        var processRunner = context.ServiceProvider.GetRequiredService<IProcessRunner>();
+        var (pendingProcessResult, processDisposable) = processRunner.Run(processSpec);
+
+        await using (processDisposable.ConfigureAwait(false))
+        {
+            try
+            {
+                var processResult = await pendingProcessResult.WaitAsync(context.CancellationToken).ConfigureAwait(false);
+                return await GetProcessCommandResultAsync(context, processCommandSpec, processResult, commandOptions).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+            {
+                return CommandResults.Canceled();
+            }
+        }
+    }
+
+    private static ProcessCommandOptions CreateProcessCommandOptions(ProcessCommandExportOptions exportOptions)
+    {
+        return CreateProcessCommandOptions(new ProcessCommandResultExportOptions
+        {
+            CommandOptions = exportOptions.CommandOptions,
+            MaxOutputLineCount = exportOptions.MaxOutputLineCount,
+            DisplayImmediately = exportOptions.DisplayImmediately,
+            SuccessExitCodes = exportOptions.SuccessExitCodes
+        });
+    }
+
+    private static ProcessCommandOptions CreateProcessCommandOptions(ProcessCommandResultExportOptions? exportOptions)
+    {
+        var commandOptions = new ProcessCommandOptions();
+        if (exportOptions is null)
+        {
+            return commandOptions;
+        }
+
+        if (exportOptions.CommandOptions is { } commonOptions)
+        {
+#pragma warning disable ASPIREINTERACTION001 // Process command exports reuse command argument metadata.
+#pragma warning disable CS0618 // Parameter is obsolete but still flowed for command option compatibility.
+            commandOptions.Description = commonOptions.Description;
+            commandOptions.Parameter = commonOptions.Parameter;
+            commandOptions.Arguments = commonOptions.Arguments;
+            commandOptions.ValidateArguments = commonOptions.ValidateArguments;
+            commandOptions.Visibility = commonOptions.Visibility;
+            commandOptions.ConfirmationMessage = commonOptions.ConfirmationMessage;
+            commandOptions.IconName = commonOptions.IconName;
+            commandOptions.IconVariant = commonOptions.IconVariant;
+            commandOptions.IsHighlighted = commonOptions.IsHighlighted;
+            commandOptions.UpdateState = commonOptions.UpdateState;
+#pragma warning restore CS0618
+#pragma warning restore ASPIREINTERACTION001
+        }
+
+        if (exportOptions.MaxOutputLineCount is { } maxOutputLineCount)
+        {
+            if (maxOutputLineCount <= 0)
+            {
+                throw new DistributedApplicationException("Process command output line count must be greater than zero.");
+            }
+
+            commandOptions.MaxOutputLineCount = maxOutputLineCount;
+        }
+
+        if (exportOptions.DisplayImmediately is { } displayImmediately)
+        {
+            commandOptions.DisplayImmediately = displayImmediately;
+        }
+
+        // Some generated clients serialize default collection values as empty arrays. Treat an empty exported list as
+        // omitted so those clients preserve the default [0] success code.
+        if (exportOptions.SuccessExitCodes is { Count: > 0 } successExitCodes)
+        {
+            commandOptions.SuccessExitCodes = successExitCodes.ToArray();
+        }
+
+        return commandOptions;
+    }
+
+    private static ProcessCommandSpec CreateProcessCommandSpec(ProcessCommandExportOptions exportOptions)
+    {
+        return CreateProcessCommandSpec(new ProcessCommandSpecExportData
+        {
+            ExecutablePath = exportOptions.ExecutablePath,
+            Arguments = exportOptions.Arguments,
+            WorkingDirectory = exportOptions.WorkingDirectory,
+            EnvironmentVariables = exportOptions.EnvironmentVariables,
+            InheritEnvironmentVariables = exportOptions.InheritEnvironmentVariables,
+            StandardInputContent = exportOptions.StandardInputContent,
+            KillEntireProcessTree = exportOptions.KillEntireProcessTree
+        });
+    }
+
+    private static ProcessCommandSpec CreateProcessCommandSpec(ProcessCommandSpecExportData exportData)
+    {
+        var executablePath = exportData.ExecutablePath;
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            throw new DistributedApplicationException("Process command requires a non-empty executable path.");
+        }
+
+        var arguments = exportData.Arguments ?? [];
+        foreach (var argument in arguments)
+        {
+            if (argument is null)
+            {
+                throw new DistributedApplicationException("Process command arguments cannot contain null values.");
+            }
+        }
+
+        return new ProcessCommandSpec(executablePath)
+        {
+            WorkingDirectory = exportData.WorkingDirectory,
+            Arguments = arguments.ToArray(),
+            EnvironmentVariables = CreateEnvironmentVariables(exportData.EnvironmentVariables),
+            InheritEnvironmentVariables = exportData.InheritEnvironmentVariables ?? true,
+            StandardInputContent = exportData.StandardInputContent,
+            KillEntireProcessTree = exportData.KillEntireProcessTree ?? true
+        };
+    }
+
+    private static Dictionary<string, string> CreateEnvironmentVariables(IReadOnlyDictionary<string, string>? environmentVariables)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (environmentVariables is null)
+        {
+            return result;
+        }
+
+        foreach (var (name, value) in environmentVariables)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                throw new DistributedApplicationException("Process command environment variables require non-empty names.");
+            }
+
+            if (value is null)
+            {
+                throw new DistributedApplicationException($"Process command environment variable '{name}' requires a value.");
+            }
+
+            result.Add(name, value);
+        }
+
+        return result;
+    }
+
+    private static ProcessSpec CreateProcessSpec(ExecuteCommandContext context, ProcessCommandSpec processCommandSpec, ProcessCommandOptions commandOptions)
+    {
+        var arguments = processCommandSpec.Arguments ?? [];
+        foreach (var argument in arguments)
+        {
+            if (argument is null)
+            {
+                throw new DistributedApplicationException($"Process command '{processCommandSpec.ExecutablePath}' arguments cannot contain null values.");
+            }
+        }
+
+        var environmentVariables = processCommandSpec.EnvironmentVariables ?? new Dictionary<string, string>();
+        foreach (var (name, value) in environmentVariables)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                throw new DistributedApplicationException($"Process command '{processCommandSpec.ExecutablePath}' environment variables require non-empty names.");
+            }
+
+            if (value is null)
+            {
+                throw new DistributedApplicationException($"Process command '{processCommandSpec.ExecutablePath}' environment variable '{name}' requires a value.");
+            }
+        }
+
+        return new ProcessSpec(processCommandSpec.ExecutablePath)
+        {
+            WorkingDirectory = processCommandSpec.WorkingDirectory,
+            ArgumentList = arguments,
+            EnvironmentVariables = environmentVariables,
+            InheritEnv = processCommandSpec.InheritEnvironmentVariables,
+            StandardInputContent = processCommandSpec.StandardInputContent,
+            KillEntireProcessTree = processCommandSpec.KillEntireProcessTree,
+            ThrowOnNonZeroReturnCode = false,
+            ResolveExecutablePath = true,
+            RetainedOutputLineCount = commandOptions.MaxOutputLineCount,
+            OnOutputData = output => context.Logger.LogDebug("{ExecutablePath} (stdout): {Output}", processCommandSpec.ExecutablePath, output),
+            OnErrorData = error => context.Logger.LogDebug("{ExecutablePath} (stderr): {Error}", processCommandSpec.ExecutablePath, error)
+        };
+    }
+
+    private static async Task<ExecuteCommandResult> GetProcessCommandResultAsync(ExecuteCommandContext context, ProcessCommandSpec processCommandSpec, ProcessResult processResult, ProcessCommandOptions commandOptions)
+    {
+        if (commandOptions.GetCommandResult is { } getCommandResult)
+        {
+            var resultContext = new ProcessCommandResultContext
+            {
+                ServiceProvider = context.ServiceProvider,
+                ResourceName = context.ResourceName,
+                Logger = context.Logger,
+                CancellationToken = context.CancellationToken,
+                ProcessCommandSpec = processCommandSpec,
+                ExitCode = processResult.ExitCode,
+                Output = processResult.ProcessOutput,
+                TotalOutputLineCount = processResult.TotalProcessOutputLineCount
+            };
+
+            return await getCommandResult(resultContext).ConfigureAwait(false);
+        }
+
+        return GetDefaultProcessCommandResult(processCommandSpec.ExecutablePath, processResult, commandOptions);
+    }
+
+    internal static ExecuteCommandResult GetDefaultProcessCommandResult(string executablePath, ProcessResult processResult, ProcessCommandOptions commandOptions)
+    {
+        var formattedOutput = processResult.GetFormattedOutput(commandOptions.MaxOutputLineCount);
+        var resultData = string.IsNullOrEmpty(formattedOutput)
+            ? null
+            : new CommandResultData
+            {
+                Value = formattedOutput,
+                Format = CommandResultFormat.Text,
+                DisplayImmediately = commandOptions.DisplayImmediately
+            };
+
+        var successExitCodes = commandOptions.SuccessExitCodes;
+        if (successExitCodes is null || successExitCodes.Count == 0)
+        {
+            throw new InvalidOperationException("Process command success exit codes must contain at least one value.");
+        }
+
+        if (successExitCodes.Contains(processResult.ExitCode))
+        {
+            return resultData is null
+                ? CommandResults.Success()
+                : new ExecuteCommandResult { Success = true, Data = resultData };
+        }
+
+        var message = $"Command '{executablePath}' exited with code {processResult.ExitCode}, which is not in the configured success exit codes [{string.Join(", ", successExitCodes)}].";
+
+        return resultData is null
+            ? CommandResults.Failure(message)
+            : CommandResults.Failure(message, resultData);
+    }
+
+    #pragma warning restore ASPIREPROCESSCOMMAND001
 
     /// <summary>
     /// Adds a command to the resource that when invoked sends an HTTP request to the specified endpoint and path.
@@ -3769,9 +4294,8 @@ public static class ResourceBuilderExtensions
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
     /// <remarks>
     /// This method allows associating a specific compute environment with the compute resource.
-    /// <para>This method is not available in polyglot app hosts.</para>
     /// </remarks>
-    [AspireExportIgnore(Reason = "IComputeEnvironmentResource is a specialized interface — not ATS-compatible.")]
+    [AspireExport(Description = "Configures the compute environment for the compute resource")]
     public static IResourceBuilder<T> WithComputeEnvironment<T>(this IResourceBuilder<T> builder, IResourceBuilder<IComputeEnvironmentResource> computeEnvironmentResource)
         where T : IComputeResource
     {

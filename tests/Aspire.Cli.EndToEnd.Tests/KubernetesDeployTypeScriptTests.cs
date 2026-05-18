@@ -21,10 +21,9 @@ public sealed class KubernetesDeployTypeScriptTests(ITestOutputHelper output)
     public async Task DeployTypeScriptAppToKubernetes()
     {
         var repoRoot = CliE2ETestHelpers.GetRepoRoot();
-        var strategy = CliInstallStrategy.Detect();
+        var strategy = CliInstallStrategy.Detect(output.WriteLine);
         using var workspace = TemporaryWorkspace.Create(output);
 
-        var commitSha = CliE2ETestHelpers.GetRequiredCommitSha();
         var clusterName = KubernetesDeployTestHelpers.GenerateUniqueClusterName();
         var k8sNamespace = $"test-{clusterName[..16]}";
 
@@ -40,12 +39,7 @@ public sealed class KubernetesDeployTypeScriptTests(ITestOutputHelper output)
         await auto.PrepareDockerEnvironmentAsync(counter, workspace);
         await auto.InstallAspireCliAsync(strategy, counter);
 
-        if (strategy.Mode == CliInstallMode.PullRequest)
-        {
-            await auto.VerifyAspireCliVersionAsync(commitSha, counter);
-        }
-
-        await auto.AssertAspireVersionAsync(counter, output);
+        await auto.VerifyPullRequestCliVersionAsync(counter);
 
         try
         {
@@ -69,7 +63,7 @@ public sealed class KubernetesDeployTypeScriptTests(ITestOutputHelper output)
             // Add Kubernetes hosting package
             await auto.TypeAsync("aspire add Aspire.Hosting.Kubernetes");
             await auto.EnterAsync();
-            await auto.WaitForAspireAddSuccessAsync(counter, TimeSpan.FromMinutes(2));
+            await auto.WaitForAspireAddCompletionAsync(counter, TimeSpan.FromMinutes(2));
 
             // Regenerate TypeScript SDK with Kubernetes types
             await auto.TypeAsync("aspire restore");
@@ -102,9 +96,11 @@ const chartVersion = await builder.addParameter("chartversion");
 
 // Add Kubernetes environment with Helm deployment
 const k8sEnv = await builder.addKubernetesEnvironment("env");
-await k8sEnv.withHelm(async (helm) => {
-    await helm.withNamespace(k8sNamespace);
-    await helm.withChartVersion(chartVersion);
+await k8sEnv.withHelm({
+    configure: async (helm) => {
+        await helm.withNamespace(k8sNamespace);
+        await helm.withChartVersion(chartVersion);
+    },
 });
 
 await builder.build().run();

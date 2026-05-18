@@ -283,6 +283,167 @@ internal static class Hex1bAutomatorTestHelpers
     }
 
     /// <summary>
+    /// Types a shell command, waits for it to complete successfully, and advances the prompt counter.
+    /// </summary>
+    internal static async Task RunCommandAsync(
+        this Hex1bTerminalAutomator auto,
+        string command,
+        SequenceCounter counter,
+        TimeSpan? timeout = null)
+    {
+        await auto.TypeAsync(command);
+        await auto.EnterAsync();
+        await auto.WaitForSuccessPromptAsync(counter, timeout);
+    }
+
+    /// <summary>
+    /// Types a shell command, waits for it to complete successfully, and fails immediately on a shell error prompt.
+    /// </summary>
+    internal static async Task RunCommandFailFastAsync(
+        this Hex1bTerminalAutomator auto,
+        string command,
+        SequenceCounter counter,
+        TimeSpan? timeout = null)
+    {
+        await auto.TypeAsync(command);
+        await auto.EnterAsync();
+        await auto.WaitForSuccessPromptFailFastAsync(counter, timeout);
+    }
+
+    /// <summary>
+    /// Configures a numbered bash prompt and changes into the provided workspace directory.
+    /// </summary>
+    internal static async Task PrepareBashEnvironmentAsync(
+        this Hex1bTerminalAutomator auto,
+        string workspacePath,
+        SequenceCounter counter,
+        TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(30);
+        var waitingForInputPattern = new CellPatternSearcher()
+            .Find("b")
+            .RightUntil("$")
+            .Right(' ')
+            .Right(' ');
+
+        await auto.WaitUntilAsync(
+            s => waitingForInputPattern.Search(s).Count > 0,
+            timeout: effectiveTimeout,
+            description: "initial bash prompt");
+        await auto.WaitAsync(500);
+
+        await auto.TypeAsync(AspireCliShellCommandHelpers.NumberedPromptSetupCommand);
+        await auto.EnterAsync();
+        await auto.WaitForSuccessPromptAsync(counter);
+
+        await auto.RunCommandAsync($"cd {AspireCliShellCommandHelpers.QuoteBashArg(workspacePath)}", counter);
+    }
+
+    /// <summary>
+    /// Extracts a localhive archive into <c>~/.aspire</c>.
+    /// </summary>
+    internal static async Task ExtractLocalHiveArchiveAsync(
+        this Hex1bTerminalAutomator auto,
+        string archivePath,
+        SequenceCounter counter)
+    {
+        await auto.RunCommandAsync(
+            AspireCliShellCommandHelpers.GetExtractLocalHiveArchiveCommand(archivePath),
+            counter,
+            TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// Configures Aspire to use the extracted localhive packages.
+    /// </summary>
+    internal static async Task ConfigureLocalHiveAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter)
+    {
+        foreach (var command in AspireCliShellCommandHelpers.GetConfigureLocalHiveCommands())
+        {
+            await auto.RunCommandAsync(command, counter);
+        }
+    }
+
+    /// <summary>
+    /// Sources the standard <c>~/.aspire</c> environment for CLI or bundle execution.
+    /// </summary>
+    internal static async Task SourceAspireEnvironmentAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter,
+        bool includeBundlePath = false)
+    {
+        await auto.RunCommandAsync(
+            AspireCliShellCommandHelpers.GetSourceAspireEnvironmentCommand(includeBundlePath),
+            counter,
+            TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// Logs the installed Aspire CLI version.
+    /// </summary>
+    internal static async Task LogAspireCliVersionAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter)
+    {
+        await auto.RunCommandAsync(
+            AspireCliShellCommandHelpers.AspireCliVersionCommand,
+            counter,
+            TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// Waits for <c>aspire add</c> to either finish directly or stop on the version-selection prompt.
+    /// </summary>
+    internal static async Task WaitForAspireAddCompletionAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter,
+        TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromMinutes(2);
+        var sawVersionPrompt = false;
+        var successPrompt = new CellPatternSearcher()
+            .FindPattern(counter.Value.ToString())
+            .RightText(" OK] $ ");
+        var errorPrompt = new CellPatternSearcher()
+            .FindPattern(counter.Value.ToString())
+            .RightText(" ERR:");
+        var waitingForVersionSelection = new CellPatternSearcher()
+            .Find("What version would you like to install?");
+        var waitingForLegacyVersionSelection = new CellPatternSearcher()
+            .Find("based on NuGet.config");
+
+        // We intentionally do NOT check for completion text like "was added successfully"
+        // because it persists on the terminal from prior aspire-add runs and would match
+        // stale output when multiple aspire-add commands run in sequence. Instead we rely
+        // on the shell success/error prompt which uses a unique counter value.
+
+        await auto.WaitUntilAsync(s =>
+            {
+                if (waitingForVersionSelection.Search(s).Count > 0 || waitingForLegacyVersionSelection.Search(s).Count > 0)
+                {
+                    sawVersionPrompt = true;
+                    return true;
+                }
+
+                return successPrompt.Search(s).Count > 0
+                    || errorPrompt.Search(s).Count > 0;
+            },
+            timeout: effectiveTimeout,
+            description: "aspire add completion or version-selection prompt");
+
+        if (!sawVersionPrompt)
+        {
+            await auto.WaitForSuccessPromptFailFastAsync(counter, effectiveTimeout);
+            return;
+        }
+
+        await auto.EnterAsync();
+        await auto.WaitForSuccessPromptFailFastAsync(counter, effectiveTimeout);
+    }
+
+    /// <summary>
     /// Handles the agent init confirmation prompt that appears after aspire init/new,
     /// then waits for the shell success prompt. Supports CLI versions with and without agent init chaining.
     /// </summary>
@@ -297,6 +458,7 @@ internal static class Hex1bAutomatorTestHelpers
             .Find("configure AI agent environments");
 
         var agentInitFound = false;
+        var errorPromptFound = false;
 
         // Wait for either the agent init prompt (new CLI) or the success prompt (old CLI).
         await auto.WaitUntilAsync(s =>
@@ -309,32 +471,39 @@ internal static class Hex1bAutomatorTestHelpers
             var successSearcher = new CellPatternSearcher()
                 .FindPattern(counter.Value.ToString())
                 .RightText(" OK] $ ");
-            return successSearcher.Search(s).Count > 0;
-        }, timeout: effectiveTimeout, description: $"agent init prompt or success prompt [{counter.Value} OK] $");
+            if (successSearcher.Search(s).Count > 0)
+            {
+                return true;
+            }
 
-        await auto.WaitAsync(500);
-
-        // Type 'n' + Enter unconditionally:
-        // - Agent init: declines the prompt, CLI exits, success prompt appears
-        // - No agent init: 'n' runs at bash (command not found), produces error prompt
-        await auto.TypeAsync("n");
-        await auto.EnterAsync();
-
-        // Wait for the aspire command's success prompt
-        await auto.WaitUntilAsync(s =>
-        {
-            var successSearcher = new CellPatternSearcher()
+            var errorSearcher = new CellPatternSearcher()
                 .FindPattern(counter.Value.ToString())
-                .RightText(" OK] $ ");
-            return successSearcher.Search(s).Count > 0;
-        }, timeout: effectiveTimeout, description: $"success prompt [{counter.Value} OK] $ after agent init");
+                .RightText(" ERR:");
+            errorPromptFound = errorSearcher.Search(s).Count > 0;
+            return errorPromptFound;
+        }, timeout: effectiveTimeout, description: $"agent init prompt, success prompt [{counter.Value} OK] $, or error prompt [{counter.Value} ERR:*] $");
 
-        // Increment counter correctly for both cases
+        if (errorPromptFound)
+        {
+            throw new InvalidOperationException($"Command failed with error prompt [{counter.Value} ERR:*] while waiting for the agent init prompt or success prompt.");
+        }
+
         if (!agentInitFound)
         {
             counter.Increment();
+            return;
         }
-        counter.Increment();
+
+        await auto.WaitAsync(500);
+        await auto.TypeAsync("n");
+
+        // Do not send Enter after typing "n" — the Spectre Console [Y/n] confirmation
+        // prompt accepts a single character. Sending Enter risks a race: if aspire init
+        // exits after reading "n" but before the Enter is delivered, bash receives the
+        // Enter and executes a phantom blank command, advancing CMDCOUNT and desyncing
+        // the test counter from the shell counter.
+
+        await auto.WaitForSuccessPromptFailFastAsync(counter, effectiveTimeout);
     }
 
     /// <summary>
@@ -367,7 +536,7 @@ internal static class Hex1bAutomatorTestHelpers
             case AspireTemplate.JsReact:
                 await auto.DownAsync();
                 await auto.WaitUntilAsync(
-                    s => new CellPatternSearcher().Find("> Starter App (ASP.NET Core/React)").Search(s).Count > 0,
+                    s => new CellPatternSearcher().Find("> Starter App (ASP.NET Core/React, C# AppHost)").Search(s).Count > 0,
                     timeout: TimeSpan.FromSeconds(5),
                     description: "JS React template selected");
                 await auto.EnterAsync();
@@ -377,7 +546,7 @@ internal static class Hex1bAutomatorTestHelpers
                 await auto.DownAsync();
                 await auto.DownAsync();
                 await auto.WaitUntilAsync(
-                    s => new CellPatternSearcher().Find("> Starter App (Express/React)").Search(s).Count > 0,
+                    s => new CellPatternSearcher().Find("> Starter App (Express/React, TypeScript AppHost)").Search(s).Count > 0,
                     timeout: TimeSpan.FromSeconds(5),
                     description: "Express React template selected");
                 await auto.EnterAsync();
@@ -388,7 +557,7 @@ internal static class Hex1bAutomatorTestHelpers
                 await auto.DownAsync();
                 await auto.DownAsync();
                 await auto.WaitUntilAsync(
-                    s => new CellPatternSearcher().Find("> Starter App (FastAPI/React)").Search(s).Count > 0,
+                    s => new CellPatternSearcher().Find("> Starter App (FastAPI/React, TypeScript AppHost)").Search(s).Count > 0,
                     timeout: TimeSpan.FromSeconds(5),
                     description: "Python React template selected");
                 await auto.EnterAsync();
@@ -411,20 +580,24 @@ internal static class Hex1bAutomatorTestHelpers
                 break;
 
             case AspireTemplate.TypeScriptEmptyAppHost:
-                await auto.TypeAsync("TypeScript");
+                await auto.TypeAsync("Empty AppHost");
+                await auto.EnterAsync();
                 await auto.WaitUntilAsync(
-                    s => new CellPatternSearcher().Find("> Empty (TypeScript AppHost)").Search(s).Count > 0,
-                    timeout: TimeSpan.FromSeconds(5),
-                    description: "TypeScript Empty AppHost template selected");
+                    s => new CellPatternSearcher().Find("Which language would you like to use?").Search(s).Count > 0,
+                    timeout: TimeSpan.FromSeconds(10),
+                    description: "AppHost language prompt");
+                await auto.TypeAsync("TypeScript");
                 await auto.EnterAsync();
                 break;
 
             case AspireTemplate.JavaEmptyAppHost:
-                await auto.TypeAsync("Empty (Java AppHost)");
+                await auto.TypeAsync("Empty AppHost");
+                await auto.EnterAsync();
                 await auto.WaitUntilAsync(
-                    s => new CellPatternSearcher().Find("> Empty (Java AppHost)").Search(s).Count > 0,
-                    timeout: TimeSpan.FromSeconds(5),
-                    description: "Java Empty AppHost template selected");
+                    s => new CellPatternSearcher().Find("Which language would you like to use?").Search(s).Count > 0,
+                    timeout: TimeSpan.FromSeconds(10),
+                    description: "AppHost language prompt");
+                await auto.TypeAsync("Java");
                 await auto.EnterAsync();
                 break;
 
@@ -445,10 +618,12 @@ internal static class Hex1bAutomatorTestHelpers
             description: "output path prompt");
         await auto.EnterAsync();
 
-        // Step 5: URLs prompt (all templates have this)
+        // Step 5: URLs prompt (all templates have this). The CLI may spend time
+        // resolving template versions after the output path is entered, so reuse
+        // the template-selection timeout for this first post-resolution prompt.
         await auto.WaitUntilAsync(
             s => new CellPatternSearcher().Find("Use *.dev.localhost URLs").Search(s).Count > 0,
-            timeout: TimeSpan.FromSeconds(10),
+            timeout: templateTimeout,
             description: "URLs prompt");
         await auto.EnterAsync(); // Accept default "No"
 
@@ -462,10 +637,12 @@ internal static class Hex1bAutomatorTestHelpers
 
             if (!useRedisCache)
             {
-                await auto.DownAsync(); // Default is "Yes", navigate to "No"
+                await auto.TypeAsync("n");
             }
-
-            await auto.EnterAsync();
+            else
+            {
+                await auto.EnterAsync();
+            }
         }
 
         // Step 7: Test project prompt (only Starter)
@@ -483,36 +660,85 @@ internal static class Hex1bAutomatorTestHelpers
     }
 
     /// <summary>
-    /// Runs <c>aspire init --language csharp</c> and handles the NuGet.config and agent init prompts.
+    /// Runs <c>aspire init --language csharp</c> and handles the NuGet.config, URLs, and agent init prompts.
     /// </summary>
     internal static async Task AspireInitAsync(
         this Hex1bTerminalAutomator auto,
         SequenceCounter counter)
     {
+        // Match the actual prompt text shape — the trailing '?' avoids false-matching
+        // informational confirmation messages like "Created NuGet.config..." which contain
+        // the same substring but are not Y/n prompts. The two real prompts are
+        // "Create NuGet.config for selected channels?" and "Update NuGet.config to add
+        // missing package sources for the selected channel?" — both end in '?'.
         var waitingForNuGetConfigPrompt = new CellPatternSearcher()
-            .Find("NuGet.config");
+            .Find("NuGet.config?");
+
+        var waitingForUrlsPrompt = new CellPatternSearcher()
+            .Find("Use *.dev.localhost URLs");
 
         var waitingForInitComplete = new CellPatternSearcher()
             .Find("Aspire initialization complete");
 
+        var waitingForAgentInitPrompt = new CellPatternSearcher()
+            .Find("configure AI agent environments");
+
         await auto.TypeAsync("aspire init --language csharp");
         await auto.EnterAsync();
 
-        // NuGet.config prompt may or may not appear depending on environment.
-        // Wait for either the NuGet.config prompt or init completion.
-        await auto.WaitUntilAsync(
-            s => waitingForNuGetConfigPrompt.Search(s).Count > 0
-                || waitingForInitComplete.Search(s).Count > 0,
-            timeout: TimeSpan.FromMinutes(2),
-            description: "NuGet.config prompt or init completion");
-        await auto.EnterAsync(); // Dismiss NuGet.config prompt if present
+        var handledNuGetConfigPrompt = false;
+        var handledUrlsPrompt = false;
 
-        await auto.WaitUntilAsync(
-            s => waitingForInitComplete.Search(s).Count > 0,
-            timeout: TimeSpan.FromMinutes(2),
-            description: "aspire initialization complete");
+        while (true)
+        {
+            var initState = "unknown";
+            await auto.WaitUntilAsync(s =>
+            {
+                if (!handledNuGetConfigPrompt && waitingForNuGetConfigPrompt.Search(s).Count > 0)
+                {
+                    initState = "nuget-config";
+                    return true;
+                }
 
-        await auto.DeclineAgentInitPromptAsync(counter);
+                if (!handledUrlsPrompt && waitingForUrlsPrompt.Search(s).Count > 0)
+                {
+                    initState = "urls";
+                    return true;
+                }
+
+                if (waitingForAgentInitPrompt.Search(s).Count > 0)
+                {
+                    initState = "agent-init";
+                    return true;
+                }
+
+                if (waitingForInitComplete.Search(s).Count > 0)
+                {
+                    initState = "init-complete";
+                    return true;
+                }
+
+                return false;
+            }, timeout: TimeSpan.FromMinutes(2), description: "NuGet.config prompt, URLs prompt, agent init prompt, or init completion");
+
+            if (initState is "nuget-config" or "urls")
+            {
+                if (initState == "nuget-config")
+                {
+                    handledNuGetConfigPrompt = true;
+                }
+                else
+                {
+                    handledUrlsPrompt = true;
+                }
+
+                await auto.EnterAsync();
+                continue;
+            }
+
+            await auto.DeclineAgentInitPromptAsync(counter);
+            return;
+        }
     }
 
     /// <summary>

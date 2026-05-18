@@ -187,7 +187,7 @@
     <value>Container runtime not installed</value>
   </data>
   <data name="ContainerRuntimeNotInstalledMessage" xml:space="preserve">
-    <value>Container runtime could not be found. See https://aka.ms/dotnet/aspire/containers for more details on supported container runtimes.</value>
+    <value>Container runtime could not be found. See https://aka.ms/aspire/containers for more details on supported container runtimes.</value>
   </data>
   <data name="DeveloperCertificateNotFullyTrustedTitle" xml:space="preserve">
     <value>Development certificate not fully trusted</value>
@@ -219,7 +219,7 @@
     <comment>Contains markdown. {0} is the parameter name.</comment>
   </data>
   <data name="ParametersInputsDeleteDescription" xml:space="preserve">
-    <value>The value is currently saved in [user secrets](https://aka.ms/aspire/user-secrets).</value>
+    <value>Delete a value that is saved in [user secrets](https://aka.ms/aspire/user-secrets).</value>
     <comment>Contains markdown</comment>
   </data>
   <data name="DeleteParameterPrimaryButtonText" xml:space="preserve">

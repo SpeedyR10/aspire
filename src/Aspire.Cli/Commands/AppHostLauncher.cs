@@ -8,9 +8,12 @@ using System.Text.Json;
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Processes;
+using Aspire.Cli.Profiling;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
+using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
+using Aspire.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Aspire.Cli.Commands;
@@ -25,6 +28,9 @@ internal sealed class AppHostLauncher(
     CliExecutionContext executionContext,
     IInteractionService interactionService,
     IAuxiliaryBackchannelMonitor backchannelMonitor,
+    ICliHostEnvironment hostEnvironment,
+    AspireCliTelemetry telemetry,
+    ProfilingTelemetry profilingTelemetry,
     ILogger<AppHostLauncher> logger,
     TimeProvider timeProvider)
 {
@@ -71,9 +77,10 @@ internal sealed class AppHostLauncher(
     /// <param name="waitForDebugger">Whether the AppHost is waiting for a debugger to attach.</param>
     /// <param name="globalArgs">Global CLI args to forward to child process.</param>
     /// <param name="additionalArgs">Additional unmatched args to forward.</param>
+    /// <param name="stopAfterLaunchDelay">Optional delay after launch before stopping the AppHost.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Exit code indicating success or failure.</returns>
-    public async Task<int> LaunchDetachedAsync(
+    /// <returns>A <see cref="CommandResult"/> indicating success or failure.</returns>
+    public async Task<CommandResult> LaunchDetachedAsync(
         FileInfo? passedAppHostProjectFile,
         OutputFormat? format,
         bool isolated,
@@ -81,25 +88,34 @@ internal sealed class AppHostLauncher(
         bool waitForDebugger,
         IEnumerable<string> globalArgs,
         IEnumerable<string> additionalArgs,
+        TimeSpan? stopAfterLaunchDelay,
         CancellationToken cancellationToken)
     {
-        // In JSON mode, avoid interactive prompts to keep stdout parseable.
-        var multipleAppHostBehavior = format == OutputFormat.Json
+        // In JSON mode or non-interactive mode, avoid interactive prompts.
+        var multipleAppHostBehavior = format == OutputFormat.Json || !hostEnvironment.SupportsInteractiveInput
             ? MultipleAppHostProjectsFoundBehavior.Throw
             : MultipleAppHostProjectsFoundBehavior.Prompt;
 
         // Failure mode 1: Project not found
-        var searchResult = await projectLocator.UseOrFindAppHostProjectFileAsync(
-            passedAppHostProjectFile,
-            multipleAppHostBehavior,
-            createSettingsFile: false,
-            cancellationToken);
+        AppHostProjectSearchResult searchResult;
+        try
+        {
+            searchResult = await projectLocator.UseOrFindAppHostProjectFileAsync(
+                passedAppHostProjectFile,
+                multipleAppHostBehavior,
+                createSettingsFile: false,
+                cancellationToken);
+        }
+        catch (ProjectLocatorException ex)
+        {
+            return BaseCommand.HandleProjectLocatorException(ex, interactionService, telemetry);
+        }
 
         var effectiveAppHostFile = searchResult.SelectedProjectFile;
 
         if (effectiveAppHostFile is null)
         {
-            return ExitCodeConstants.FailedToFindProject;
+            return CommandResult.Failure(CliExitCodes.FailedToFindProject);
         }
 
         logger.LogDebug("Starting AppHost in background: {AppHostPath}", effectiveAppHostFile.FullName);
@@ -109,6 +125,7 @@ internal sealed class AppHostLauncher(
 
         // Build child process arguments
         var childLogFile = GenerateChildLogFilePath(executionContext.LogsDirectory.FullName, timeProvider);
+        executionContext.AppHostCliLogFilePath = childLogFile;
         var (executablePath, childArgs) = BuildChildProcessArgs(effectiveAppHostFile, childLogFile, isolated, globalArgs, additionalArgs);
 
         // Compute the expected socket prefix for backchannel detection
@@ -116,8 +133,13 @@ internal sealed class AppHostLauncher(
             effectiveAppHostFile.FullName,
             executionContext.HomeDirectory.FullName);
         var expectedHash = AppHostHelper.ExtractHashFromSocketPath(expectedSocketPrefix)!;
+        var legacyHash = AppHostHelper.ComputeLegacyHash(effectiveAppHostFile.FullName);
 
         logger.LogDebug("Waiting for socket with prefix: {SocketPrefix}, Hash: {Hash}", expectedSocketPrefix, expectedHash);
+        if (legacyHash is not null)
+        {
+            logger.LogDebug("Also searching for legacy hash: {LegacyHash}", legacyHash);
+        }
 
         // If --wait-for-debugger is active, show a message so the user knows the AppHost
         // is paused. In detached mode we don't have the AppHost PID (stdout is suppressed),
@@ -132,18 +154,59 @@ internal sealed class AppHostLauncher(
         // Start the child process and wait for the backchannel
         var launchResult = await interactionService.ShowStatusAsync(
             RunCommandStrings.StartingAppHostInBackground,
-            () => LaunchAndWaitForBackchannelAsync(executablePath, childArgs, expectedHash, cancellationToken));
+            () => LaunchAndWaitForBackchannelAsync(executablePath, childArgs, expectedHash, legacyHash, cancellationToken));
 
         // Handle failure cases
         if (launchResult.Backchannel is null || launchResult.ChildProcess is null)
         {
-            return HandleLaunchFailure(launchResult, childLogFile);
+            return CommandResult.FromExitCode(HandleLaunchFailure(launchResult));
         }
 
         // Display results
         DisplayLaunchResult(launchResult, effectiveAppHostFile, childLogFile, format, isExtensionHost);
 
-        return ExitCodeConstants.Success;
+        if (stopAfterLaunchDelay is not null)
+        {
+            await StopLaunchedAppHostAsync(launchResult, stopAfterLaunchDelay.Value, cancellationToken).ConfigureAwait(false);
+        }
+
+        return CommandResult.Success();
+    }
+
+    private async Task StopLaunchedAppHostAsync(LaunchResult result, TimeSpan delay, CancellationToken cancellationToken)
+    {
+        if (delay > TimeSpan.Zero)
+        {
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (result.Backchannel is not null)
+        {
+            // Reuse the shared "RPC stop + wait for termination" flow so capture mode follows the
+            // same teardown path as socket-discovered running-instance stops.
+            var manager = new RunningInstanceManager(logger, interactionService, timeProvider);
+            await manager.StopAndMonitorAsync(result.Backchannel, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (result.ChildProcess is { HasExited: false } childProcess)
+        {
+            // Safety net for the hidden capture path: if the RPC stop did not bring the spawned
+            // child CLI down within the grace period, terminate the process tree so we never
+            // leave an orphaned AppHost behind.
+            try
+            {
+                await childProcess.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                childProcess.Kill(entireProcessTree: true);
+            }
+            catch (OperationCanceledException) when (!childProcess.HasExited)
+            {
+                childProcess.Kill(entireProcessTree: true);
+                throw;
+            }
+        }
     }
 
     private async Task StopExistingInstancesAsync(FileInfo effectiveAppHostFile, CancellationToken cancellationToken)
@@ -228,34 +291,51 @@ internal sealed class AppHostLauncher(
     internal static bool IsExtensionEnvironmentVariable(string name) =>
         name.StartsWith(ExtensionEnvironmentVariablePrefix, StringComparison.OrdinalIgnoreCase);
 
+    internal static Dictionary<string, string> CreateDetachedChildEnvironment(Activity? activity)
+    {
+        var environment = new Dictionary<string, string> { [KnownConfigNames.CliRunDetached] = "true" };
+        ProfilingTelemetry.AddActivityContextToEnvironment(activity, environment);
+        ProfileCaptureEnvironment.AddCurrentToEnvironment(environment);
+        return environment;
+    }
+
     private record LaunchResult(Process? ChildProcess, IAppHostAuxiliaryBackchannel? Backchannel, DashboardUrlsState? DashboardUrls, bool ChildExitedEarly, int ChildExitCode);
 
     private async Task<LaunchResult> LaunchAndWaitForBackchannelAsync(
         string executablePath,
         List<string> childArgs,
         string expectedHash,
+        string? legacyHash,
         CancellationToken cancellationToken)
     {
         Process childProcess;
 
-        try
+        using (var spawnActivity = profilingTelemetry.StartDetachedSpawnChild(executablePath, childArgs, "run"))
         {
-            childProcess = DetachedProcessLauncher.Start(
-                executablePath,
-                childArgs,
-                executionContext.WorkingDirectory.FullName,
-                IsExtensionEnvironmentVariable);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to start child CLI process");
-            return new LaunchResult(null, null, null, false, 0);
+            try
+            {
+                childProcess = DetachedProcessLauncher.Start(
+                    executablePath,
+                    childArgs,
+                    executionContext.WorkingDirectory.FullName,
+                    IsExtensionEnvironmentVariable,
+                    CreateDetachedChildEnvironment(Activity.Current));
+                spawnActivity.SetProcessId(childProcess.Id);
+            }
+            catch (Exception ex)
+            {
+                spawnActivity.SetError(ex.Message);
+                logger.LogError(ex, "Failed to start child CLI process");
+                return new LaunchResult(null, null, null, false, 0);
+            }
         }
 
         logger.LogDebug("Child CLI process started with PID: {PID}", childProcess.Id);
 
         var startTime = timeProvider.GetUtcNow();
         var timeout = TimeSpan.FromSeconds(120);
+        using var waitForBackchannelActivity = profilingTelemetry.StartDetachedWaitForBackchannel(childProcess.Id, expectedHash, legacyHash is not null);
+        var scanCount = 0;
 
         while (timeProvider.GetUtcNow() - startTime < timeout)
         {
@@ -264,23 +344,34 @@ internal sealed class AppHostLauncher(
             if (childProcess.HasExited)
             {
                 var exitCode = childProcess.ExitCode;
+                waitForBackchannelActivity.SetProcessExitCode(exitCode);
+                waitForBackchannelActivity.SetError($"Child CLI exited with code {exitCode}.");
                 logger.LogWarning("Child CLI process exited with code {ExitCode}", exitCode);
                 return new LaunchResult(childProcess, null, null, true, exitCode);
             }
 
             await backchannelMonitor.ScanAsync(cancellationToken).ConfigureAwait(false);
+            scanCount++;
 
-            var connection = backchannelMonitor.GetConnectionsByHash(expectedHash).FirstOrDefault();
+            var connection = backchannelMonitor.GetConnectionsByHash(expectedHash).FirstOrDefault()
+                ?? (legacyHash is not null ? backchannelMonitor.GetConnectionsByHash(legacyHash).FirstOrDefault() : null);
             if (connection is not null)
             {
+                waitForBackchannelActivity.SetBackchannelScanCount(scanCount);
+                waitForBackchannelActivity.AddStartAppHostBackchannelConnectedEvent();
                 DashboardUrlsState? dashboardUrls = null;
-                try
+                using (var getDashboardUrlsActivity = profilingTelemetry.StartDetachedGetDashboardUrls())
                 {
-                    dashboardUrls = await connection.GetDashboardUrlsAsync(cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogDebug(ex, "Failed to retrieve dashboard URLs from backchannel connection. Continuing without dashboard URLs.");
+                    try
+                    {
+                        dashboardUrls = await connection.GetDashboardUrlsAsync(cancellationToken).ConfigureAwait(false);
+                        getDashboardUrlsActivity.SetAppHostDashboardUrls(dashboardUrls);
+                    }
+                    catch (Exception ex)
+                    {
+                        getDashboardUrlsActivity.SetError(ex.Message);
+                        logger.LogDebug(ex, "Failed to retrieve dashboard URLs from backchannel connection. Continuing without dashboard URLs.");
+                    }
                 }
 
                 return new LaunchResult(childProcess, connection, dashboardUrls, false, 0);
@@ -296,15 +387,17 @@ internal sealed class AppHostLauncher(
             }
         }
 
+        waitForBackchannelActivity.SetBackchannelScanCount(scanCount);
+        waitForBackchannelActivity.SetError("Timed out waiting for AppHost backchannel.");
         return new LaunchResult(childProcess, null, null, false, 0);
     }
 
-    private int HandleLaunchFailure(LaunchResult result, string childLogFile)
+    private int HandleLaunchFailure(LaunchResult result)
     {
         if (result.ChildProcess is null)
         {
             interactionService.DisplayError(RunCommandStrings.FailedToStartAppHost);
-            return ExitCodeConstants.FailedToDotnetRunAppHost;
+            return CliExitCodes.FailedToDotnetRunAppHost;
         }
 
         if (result.ChildExitedEarly)
@@ -328,12 +421,7 @@ internal sealed class AppHostLauncher(
             }
         }
 
-        interactionService.DisplayMessage(KnownEmojis.MagnifyingGlassTiltedLeft, string.Format(
-            CultureInfo.CurrentCulture,
-            RunCommandStrings.CheckLogsForDetails,
-            childLogFile));
-
-        return ExitCodeConstants.FailedToDotnetRunAppHost;
+        return CliExitCodes.FailedToDotnetRunAppHost;
     }
 
     private void DisplayLaunchResult(
@@ -382,7 +470,7 @@ internal sealed class AppHostLauncher(
     {
         return childExitCode switch
         {
-            ExitCodeConstants.FailedToBuildArtifacts => RunCommandStrings.AppHostFailedToBuild,
+            CliExitCodes.FailedToBuildArtifacts => RunCommandStrings.AppHostFailedToBuild,
             _ => string.Format(CultureInfo.CurrentCulture, RunCommandStrings.AppHostExitedWithCode, childExitCode)
         };
     }

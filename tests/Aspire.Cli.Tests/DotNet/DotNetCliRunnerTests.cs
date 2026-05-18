@@ -6,10 +6,12 @@ using Aspire.Cli.DotNet;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
+using Aspire.Hosting;
 using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using System.Net.Sockets;
 
 namespace Aspire.Cli.Tests.DotNet;
 
@@ -17,12 +19,7 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
 {
     private static Aspire.Cli.CliExecutionContext CreateExecutionContext(DirectoryInfo workingDirectory)
     {
-        // NOTE: This would normally be in the users home directory, but for tests we create
-        //       it in the temporary workspace directory.
-        var settingsDirectory = workingDirectory.CreateSubdirectory(".aspire");
-        var hivesDirectory = settingsDirectory.CreateSubdirectory("hives");
-        var cacheDirectory = new DirectoryInfo(Path.Combine(workingDirectory.FullName, ".aspire", "cache"));
-        return new CliExecutionContext(workingDirectory, hivesDirectory, cacheDirectory, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")), new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-logs")), "test.log");
+        return TestExecutionContextHelper.CreateExecutionContext(workingDirectory);
     }
 
     [Fact]
@@ -215,6 +212,79 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
             0);
 
         var exitCode = await runner.BuildAsync(projectFile, noRestore: false, options, CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task BuildAsyncAddsBinlogWhenBinlogDirectoryIsConfigured()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var binlogDirectory = workspace.WorkspaceRoot.CreateSubdirectory("binlogs");
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [KnownConfigNames.CliDotnetBinlogDirectory] = binlogDirectory.FullName
+            })
+            .Build();
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var options = new ProcessInvocationOptions();
+
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (args, _, _, _) =>
+            {
+                var binlogArgument = Assert.Single(args, arg => arg.StartsWith("/bl:", StringComparison.Ordinal));
+                var binlogPath = binlogArgument["/bl:".Length..];
+                Assert.Equal(binlogDirectory.FullName, Path.GetDirectoryName(binlogPath));
+                Assert.EndsWith(".binlog", binlogPath);
+                Assert.Contains("build", Path.GetFileName(binlogPath));
+                Assert.Contains("AppHost", Path.GetFileName(binlogPath));
+            },
+            0,
+            configuration: configuration);
+
+        var exitCode = await runner.BuildAsync(projectFile, noRestore: false, options, CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task NewProjectAsyncDoesNotAddBinlogWhenBinlogDirectoryIsConfigured()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [KnownConfigNames.CliDotnetBinlogDirectory] = workspace.WorkspaceRoot.CreateSubdirectory("binlogs").FullName
+            })
+            .Build();
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var options = new ProcessInvocationOptions();
+
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (args, _, _, _) =>
+            {
+                Assert.DoesNotContain(args, arg => arg.StartsWith("/bl:", StringComparison.Ordinal));
+            },
+            0,
+            configuration: configuration);
+
+        var exitCode = await runner.NewProjectAsync("aspire", "TestProject", "/tmp/test", [], options, CancellationToken.None).DefaultTimeout();
 
         Assert.Equal(0, exitCode);
     }
@@ -550,7 +620,98 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
             cancellationToken: CancellationToken.None).DefaultTimeout();
 
         await launchAppHostCalledTcs.Task.DefaultTimeout();
-        Assert.Equal(ExitCodeConstants.Success, exitCode);
+        Assert.Equal(CliExitCodes.Success, exitCode);
+    }
+
+    [Fact]
+    public async Task RunAsyncFailsBackchannelWhenExtensionLaunchedAppHostDoesNotConnectBeforeTimeout()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = sp => new TestExtensionInteractionService(sp);
+            options.ConfigurationCallback = configBuilder =>
+            {
+                configBuilder["ASPIRE_EXTENSION_TOKEN"] = "extension-token";
+                configBuilder[KnownConfigNames.CliBackchannelConnectTimeoutSeconds] = "0";
+            };
+            options.ExtensionBackchannelFactory = _ => new TestExtensionBackchannel
+            {
+                HasCapabilityAsyncCallback = (c, _) => Task.FromResult(c is "devkit" or "project"),
+            };
+            options.AppHostBackchannelFactory = _ => new TestAppHostBackchannel
+            {
+                ConnectAsyncCallback = (_, _) => throw new SocketException((int)SocketError.ConnectionRefused)
+            };
+        });
+
+        using var provider = services.BuildServiceProvider();
+        var runner = provider.GetRequiredService<IDotNetCliRunner>();
+        var backchannelCompletionSource = new TaskCompletionSource<IAppHostCliBackchannel>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var exitCode = await runner.RunAsync(
+            projectFile: projectFile,
+            watch: false,
+            noBuild: false,
+            noRestore: false,
+            args: [],
+            env: new Dictionary<string, string>
+            {
+                [KnownConfigNames.UnixSocketPath] = Path.Combine(workspace.WorkspaceRoot.FullName, "cli.sock")
+            },
+            backchannelCompletionSource,
+            new ProcessInvocationOptions(),
+            CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var exception = await Assert.ThrowsAsync<TimeoutException>(
+            () => backchannelCompletionSource.Task.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Contains("Timed out waiting for AppHost backchannel", exception.Message);
+    }
+
+    [Fact]
+    public async Task RunAsyncFailsBackchannelWhenAppHostExitsWithSuccessBeforeBackchannelConnects()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.DotNetCliExecutionFactoryFactory = _ => new TestProcessExecutionFactory
+            {
+                CreateExecutionCallback = (args, env, _, _) => new ExitedProcessExecution(args, env, exitCode: 0)
+            };
+            options.AppHostBackchannelFactory = _ => new TestAppHostBackchannel
+            {
+                ConnectAsyncCallback = (_, _) => throw new SocketException((int)SocketError.ConnectionRefused)
+            };
+        });
+        using var provider = services.BuildServiceProvider();
+        var runner = provider.GetRequiredService<IDotNetCliRunner>();
+        var backchannelCompletionSource = new TaskCompletionSource<IAppHostCliBackchannel>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var exitCode = await runner.RunAsync(
+            projectFile: projectFile,
+            watch: false,
+            noBuild: false,
+            noRestore: false,
+            args: [],
+            env: new Dictionary<string, string>
+            {
+                [KnownConfigNames.UnixSocketPath] = Path.Combine(workspace.WorkspaceRoot.FullName, "cli.sock")
+            },
+            backchannelCompletionSource,
+            new ProcessInvocationOptions(),
+            CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        var exception = await Assert.ThrowsAsync<FailedToConnectBackchannelConnection>(
+            () => backchannelCompletionSource.Task.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Contains("AppHost process has exited", exception.Message);
     }
 
     [Fact]
@@ -1197,7 +1358,7 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
                 // Verify that "build" command is used for single-file app host
                 Assert.Contains("build", args);
                 Assert.DoesNotContain("msbuild", args);
-                
+
                 // Provide valid JSON output
                 invocationOptions.StandardOutputCallback?.Invoke("{\"Properties\":{\"MSBuildVersion\":\"17.0.0\",\"AspireHostingSDKVersion\":\"9.0.0\"},\"Items\":{\"PackageReference\":[]}}");
             },
@@ -1210,6 +1371,91 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
             options,
             CancellationToken.None
         );
+    }
+
+    [Fact]
+    public async Task GetAppHostInformationAsync_UsesAspireHostingAppHostPackageVersion()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (args, _, _, invocationOptions) =>
+            {
+                Assert.Contains("-getItem:PackageReference,AspireProjectOrPackageReference,PackageVersion", args);
+                invocationOptions.StandardOutputCallback?.Invoke("""
+                    {
+                      "Properties": {
+                        "MSBuildVersion": "17.0.0",
+                        "IsAspireHost": "true"
+                      },
+                      "Items": {
+                        "PackageReference": [
+                          {
+                            "Identity": "Aspire.Hosting.AppHost",
+                            "Version": "13.0.0"
+                          }
+                        ]
+                      }
+                    }
+                    """);
+            },
+            0);
+
+        var result = await runner.GetAppHostInformationAsync(projectFile, new ProcessInvocationOptions(), CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.IsAspireHost);
+        Assert.Equal("13.0.0", result.AspireHostingVersion);
+    }
+
+    [Fact]
+    public async Task GetAppHostInformationAsync_UsesAspireHostingAppHostCentralPackageVersion()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (_, _, _, invocationOptions) =>
+            {
+                invocationOptions.StandardOutputCallback?.Invoke("""
+                    {
+                      "Properties": {
+                        "MSBuildVersion": "17.0.0",
+                        "IsAspireHost": "true"
+                      },
+                      "Items": {
+                        "PackageVersion": [
+                          {
+                            "Identity": "Aspire.Hosting.AppHost",
+                            "Version": "13.0.1"
+                          }
+                        ]
+                      }
+                    }
+                    """);
+            },
+            0);
+
+        var result = await runner.GetAppHostInformationAsync(projectFile, new ProcessInvocationOptions(), CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.IsAspireHost);
+        Assert.Equal("13.0.1", result.AspireHostingVersion);
     }
 
     [Fact]
@@ -1228,12 +1474,15 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
         var runner = DotNetCliRunnerTestHelper.Create(
             provider,
             executionContext,
-            (args, _, _, invocationOptions) =>
+            (args, env, _, invocationOptions) =>
             {
                 // Verify that "msbuild" command is used for .csproj files
                 Assert.Contains("msbuild", args);
                 Assert.DoesNotContain("build", args);
-                
+                Assert.NotNull(env);
+                Assert.Equal("1", env["DOTNET_CLI_TELEMETRY_OPTOUT"]);
+                Assert.Equal("1", env["DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE"]);
+
                 // Provide valid JSON output
                 invocationOptions.StandardOutputCallback?.Invoke("{\"Properties\":{\"MSBuildVersion\":\"17.0.0\",\"AspireHostingSDKVersion\":\"9.0.0\"},\"Items\":{\"PackageReference\":[]}}");
             },
@@ -1280,6 +1529,7 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
         var result = await runner.SearchPackagesAsync(
             workspace.WorkspaceRoot,
             "Aspire.Hosting",
+            exactMatch: false,
             prerelease: false,
             take: 100,
             skip: 0,
@@ -1321,6 +1571,7 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
         var result = await runner.SearchPackagesAsync(
             workspace.WorkspaceRoot,
             "Aspire.Hosting",
+            exactMatch: false,
             prerelease: false,
             take: 100,
             skip: 0,
@@ -1362,6 +1613,7 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
         var result = await runner.SearchPackagesAsync(
             workspace.WorkspaceRoot,
             "Aspire.Hosting",
+            exactMatch: false,
             prerelease: false,
             take: 100,
             skip: 0,
@@ -1374,6 +1626,57 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
         Assert.Equal(0, result.ExitCode);
         Assert.NotNull(result.Packages);
         Assert.Equal(1, executor.AttemptCount); // Should have attempted only once
+    }
+
+    [Fact]
+    public async Task SearchPackagesAsync_WithExactMatch_UsesExactMatchFlagWithoutPaginationArguments()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var options = new ProcessInvocationOptions { SuppressLogging = true };
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (args, _, _, invocationOptions) =>
+            {
+                Assert.Contains("package", args);
+                Assert.Contains("search", args);
+                Assert.Contains("Aspire.Hosting.Redis", args);
+                Assert.Contains("--exact-match", args);
+                Assert.DoesNotContain("--take", args);
+                Assert.DoesNotContain("--skip", args);
+
+                invocationOptions.StandardOutputCallback?.Invoke(
+                    """
+                    {"version":1,"searchResult":[{"sourceName":"nuget.org","packages":[{"id":"Aspire.Hosting.Redis","latestVersion":"13.3.0"}]}]}
+                    """);
+            },
+            0);
+
+        var result = await runner.SearchPackagesAsync(
+            workspace.WorkspaceRoot,
+            "Aspire.Hosting.Redis",
+            exactMatch: true,
+            prerelease: false,
+            take: 100,
+            skip: 200,
+            nugetConfigFile: null,
+            useCache: false,
+            options,
+            CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Collection(
+            result.Packages!,
+            package =>
+            {
+                Assert.Equal("Aspire.Hosting.Redis", package.Id);
+                Assert.Equal("13.3.0", package.Version);
+            });
     }
 
     [Fact]
@@ -1602,5 +1905,81 @@ public class DotNetCliRunnerTests(ITestOutputHelper outputHelper)
             CancellationToken.None).DefaultTimeout();
 
         Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task RunAsyncSetsCliLogFilePathEnvironmentVariable()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var projectFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "AppHost.csproj"));
+        await File.WriteAllTextAsync(projectFile.FullName, "Not a real project file.");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var provider = services.BuildServiceProvider();
+
+        var options = new ProcessInvocationOptions();
+
+        Dictionary<string, string>? capturedEnv = null;
+        var executionContext = CreateExecutionContext(workspace.WorkspaceRoot);
+        var runner = DotNetCliRunnerTestHelper.Create(
+            provider,
+            executionContext,
+            (args, env, _, _) =>
+            {
+                capturedEnv = env?.ToDictionary();
+            },
+            0);
+
+        var exitCode = await runner.RunAsync(
+            projectFile: projectFile,
+            watch: false,
+            noBuild: true,
+            noRestore: true,
+            args: ["--operation", "inspect"],
+            env: new Dictionary<string, string>(),
+            null,
+            options,
+            CancellationToken.None).DefaultTimeout();
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(capturedEnv);
+        Assert.Equal(executionContext.LogFilePath, capturedEnv[KnownConfigNames.CliLogFilePath]);
+    }
+
+    private sealed class ExitedProcessExecution(
+        IReadOnlyList<string> arguments,
+        IDictionary<string, string>? environmentVariables,
+        int exitCode) : IProcessExecution
+    {
+        private bool _started;
+
+        public string FileName => "dotnet";
+
+        public IReadOnlyList<string> Arguments { get; } = arguments;
+
+        public IReadOnlyDictionary<string, string?> EnvironmentVariables { get; } = environmentVariables?.ToDictionary(kvp => kvp.Key, kvp => (string?)kvp.Value)
+            ?? new Dictionary<string, string?>();
+
+        public int ProcessId => Environment.ProcessId;
+
+        public bool HasExited => _started;
+
+        public int ExitCode => exitCode;
+
+        public bool Start()
+        {
+            _started = true;
+            return true;
+        }
+
+        public Task<int> WaitForExitAsync(CancellationToken cancellationToken) => Task.FromResult(exitCode);
+
+        public void Kill(bool entireProcessTree)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
     }
 }

@@ -18,8 +18,8 @@
         <note />
       </trans-unit>
       <trans-unit id="ContainerRuntimeNotInstalledMessage">
-        <source>Container runtime could not be found. See https://aka.ms/dotnet/aspire/containers for more details on supported container runtimes.</source>
-        <target state="translated">コンテナー ランタイムが見つかりませんでした。サポートされているコンテナー ランタイムの詳細については、https://aka.ms/dotnet/aspire/containers を参照してください。</target>
+        <source>Container runtime could not be found. See https://aka.ms/aspire/containers for more details on supported container runtimes.</source>
+        <target state="translated">コンテナー ランタイムが見つかりませんでした。サポートされているコンテナー ランタイムの詳細については、https://aka.ms/aspire/containers を参照してください。</target>
         <note />
       </trans-unit>
       <trans-unit id="ContainerRuntimeNotInstalledTitle">
@@ -93,8 +93,8 @@
         <note />
       </trans-unit>
       <trans-unit id="ParametersInputsDeleteDescription">
-        <source>The value is currently saved in [user secrets](https://aka.ms/aspire/user-secrets).</source>
-        <target state="new">The value is currently saved in [user secrets](https://aka.ms/aspire/user-secrets).</target>
+        <source>Delete a value that is saved in [user secrets](https://aka.ms/aspire/user-secrets).</source>
+        <target state="new">Delete a value that is saved in [user secrets](https://aka.ms/aspire/user-secrets).</target>
         <note>Contains markdown</note>
       </trans-unit>
       <trans-unit id="ParametersInputsDeleteLabel">

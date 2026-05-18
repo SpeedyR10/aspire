@@ -3,6 +3,7 @@
 
 using System.Globalization;
 using System.Xml.Linq;
+using Aspire.Cli.Resources;
 using Aspire.Cli.Tests.Utils;
 using Hex1b.Automation;
 using Xunit;
@@ -11,7 +12,7 @@ namespace Aspire.Cli.EndToEnd.Tests.Helpers;
 
 /// <summary>
 /// Extension methods for <see cref="Hex1bTerminalAutomator"/> providing Docker E2E test helpers.
-/// These parallel the <see cref="Hex1b.Automation.Hex1bTerminalInputSequenceBuilder"/>-based methods in <see cref="CliE2ETestHelpers"/>.
+/// These helpers compose the shared Hex1b shell helpers with CLI-specific behavior.
 /// </summary>
 /// <remarks>
 /// These helpers are intentionally bash-first and Linux-specific. The tests drive a real terminal session, so the
@@ -39,39 +40,28 @@ internal static class CliE2EAutomatorHelpers
 
         // Install the numbered prompt contract used throughout these tests. The prompt encodes both the command
         // sequence number and the exit code so waits can synchronize on shell completion instead of timing guesses.
-        const string promptSetup = "CMDCOUNT=0; PROMPT_COMMAND='s=$?;((CMDCOUNT++));PS1=\"[$CMDCOUNT $([ $s -eq 0 ] && echo OK || echo ERR:$s)] \\$ \"'";
-        await auto.TypeAsync(promptSetup);
+        await auto.TypeAsync(AspireCliShellCommandHelpers.NumberedPromptSetupCommand);
         await auto.EnterAsync();
         await auto.WaitForSuccessPromptAsync(counter);
 
         // Set permissive umask
-        await auto.TypeAsync("umask 000");
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
+        await auto.RunCommandAsync("umask 000", counter);
 
         // Set environment variables
-        await auto.TypeAsync("export ASPIRE_PLAYGROUND=true TERM=xterm DOTNET_CLI_TELEMETRY_OPTOUT=true DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true DOTNET_GENERATE_ASPNET_CERTIFICATE=false");
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
+        await auto.RunCommandAsync(AspireCliShellCommandHelpers.GetPrepareAspireEnvironmentCommand(), counter);
 
         if (enableDcpDiagnostics)
         {
-            await auto.TypeAsync("export DCP_DIAGNOSTICS_LOG_LEVEL=debug DCP_DIAGNOSTICS_LOG_FOLDER=~/.aspire/dcp-logs DCP_PRESERVE_EXECUTABLE_LOGS=1");
-            await auto.EnterAsync();
-            await auto.WaitForSuccessPromptAsync(counter);
+            await auto.RunCommandAsync("export DCP_DIAGNOSTICS_LOG_LEVEL=debug DCP_DIAGNOSTICS_LOG_FOLDER=~/.aspire/dcp-logs DCP_PRESERVE_EXECUTABLE_LOGS=1", counter);
         }
 
         if (workspace is not null)
         {
             var containerWorkspace = $"/workspace/{workspace.WorkspaceRoot.Name}";
 
-            await auto.TypeAsync($"cd {containerWorkspace}");
-            await auto.EnterAsync();
-            await auto.WaitForSuccessPromptAsync(counter);
+            await auto.RunCommandAsync($"cd {AspireCliShellCommandHelpers.QuoteBashArg(containerWorkspace)}", counter);
 
-            await auto.TypeAsync($"export ASPIRE_E2E_WORKSPACE={containerWorkspace}");
-            await auto.EnterAsync();
-            await auto.WaitForSuccessPromptAsync(counter);
+            await auto.RunCommandAsync($"export ASPIRE_E2E_WORKSPACE={AspireCliShellCommandHelpers.QuoteBashArg(containerWorkspace)}", counter);
 
             if (!CliE2ETestHelpers.IsRunningInCI && ShouldPreserveLocalWorkspace())
             {
@@ -80,57 +70,18 @@ internal static class CliE2EAutomatorHelpers
 
             if (ShouldCaptureWorkspaceDiagnostics())
             {
-                await auto.TypeAsync(
+                await auto.RunCommandAsync(
                     "trap 'if [ -n \"$ASPIRE_E2E_WORKSPACE\" ]; then " +
                     BuildAspireDiagnosticsCaptureCommand("$ASPIRE_E2E_WORKSPACE") +
-                    "fi' EXIT");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptAsync(counter);
+                    "fi' EXIT",
+                    counter);
             }
         }
     }
 
-    /// <summary>
-    /// Installs the Aspire CLI inside a Docker container based on the detected install mode.
-    /// </summary>
-    internal static async Task InstallAspireCliInDockerAsync(
-        this Hex1bTerminalAutomator auto,
-        CliE2ETestHelpers.DockerInstallMode installMode,
-        SequenceCounter counter)
+    internal static Task WaitUntilAppHostStoppedSuccessfullyAsync(this Hex1bTerminalAutomator auto, TimeSpan timeout)
     {
-        switch (installMode)
-        {
-            case CliE2ETestHelpers.DockerInstallMode.SourceBuild:
-                await auto.TypeAsync("mkdir -p ~/.aspire/bin && cp /opt/aspire-cli/aspire ~/.aspire/bin/aspire && chmod +x ~/.aspire/bin/aspire");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptAsync(counter, TimeSpan.FromSeconds(30));
-                await auto.TypeAsync("export PATH=~/.aspire/bin:$PATH");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptAsync(counter);
-                break;
-
-            case CliE2ETestHelpers.DockerInstallMode.GaRelease:
-                await auto.TypeAsync("/opt/aspire-scripts/get-aspire-cli.sh");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptFailFastAsync(counter, TimeSpan.FromSeconds(120));
-                await auto.TypeAsync("export PATH=~/.aspire/bin:$PATH");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptAsync(counter);
-                break;
-
-            case CliE2ETestHelpers.DockerInstallMode.PullRequest:
-                var prNumber = CliE2ETestHelpers.GetRequiredPrNumber();
-                await auto.TypeAsync($"/opt/aspire-scripts/get-aspire-cli-pr.sh {GetPullRequestInstallArgs(prNumber)}");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptFailFastAsync(counter, TimeSpan.FromSeconds(300));
-                await auto.TypeAsync("export PATH=~/.aspire/bin:~/.aspire:$PATH");
-                await auto.EnterAsync();
-                await auto.WaitForSuccessPromptAsync(counter);
-                break;
-
-            default:
-                throw new ArgumentOutOfRangeException(nameof(installMode));
-        }
+        return auto.WaitUntilTextAsync(GetAppHostStoppedSuccessfullySuffix(), timeout: timeout);
     }
 
     /// <summary>
@@ -146,26 +97,281 @@ internal static class CliE2EAutomatorHelpers
         {
             case CliInstallMode.LocalHive:
                 await auto.ExtractLocalHiveArchiveAsync("/tmp/aspire-localhive.tar.gz", counter);
-                await auto.RunCommandAsync("export PATH=~/.aspire/bin:$PATH", counter);
+                await auto.SourceAspireCliEnvironmentAsync(counter);
                 await auto.ConfigureLocalHiveAsync(counter);
                 break;
 
+            case CliInstallMode.Preinstalled:
+                throw new InvalidOperationException("Preinstalled CLI mode is only supported for non-Docker test environments.");
+
             case CliInstallMode.PullRequest:
                 var prNumber = CliE2ETestHelpers.GetRequiredPrNumber();
-                await auto.RunCommandFailFastAsync($"/opt/aspire-scripts/get-aspire-cli-pr.sh {GetPullRequestInstallArgs(prNumber)}", counter, TimeSpan.FromSeconds(300));
-                await auto.RunCommandAsync("export PATH=~/.aspire/bin:~/.aspire:$PATH", counter);
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetPullRequestInstallCommand(prNumber, AspireCliShellCommandHelpers.DockerPullRequestInstallCommandPrefix),
+                    counter,
+                    TimeSpan.FromSeconds(300));
+                await auto.SourceAspireBundleEnvironmentAsync(counter);
+                break;
+
+            case CliInstallMode.LocalArchive:
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetLocalArchiveInstallCommand("/tmp/aspire-cli-archives", AspireCliShellCommandHelpers.DockerPullRequestInstallCommandPrefix),
+                    counter,
+                    TimeSpan.FromSeconds(120));
+                await auto.SourceAspireBundleEnvironmentAsync(counter);
                 break;
 
             case CliInstallMode.InstallScript:
-                await auto.RunCommandFailFastAsync($"/opt/aspire-scripts/get-aspire-cli.sh{GetInstallScriptArgs(strategy)}", counter, TimeSpan.FromSeconds(120));
-                await auto.RunCommandAsync("export PATH=~/.aspire/bin:$PATH", counter);
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetInstallScriptCommand(strategy, AspireCliShellCommandHelpers.DockerInstallScriptCommandPrefix),
+                    counter,
+                    TimeSpan.FromSeconds(120));
+                await auto.SourceAspireCliEnvironmentAsync(counter);
+                break;
+
+            case CliInstallMode.DotnetTool:
+                await auto.SourceDotnetToolEnvironmentAsync(counter);
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetDotnetToolInstallCommandInDocker(strategy),
+                    counter,
+                    TimeSpan.FromSeconds(120));
                 break;
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(strategy), strategy.Mode, "Unknown install mode");
         }
 
-        await auto.LogInstalledAspireCliVersionAsync(counter);
+        await auto.VerifyAspireCliVersionAsync(strategy, counter);
+    }
+
+    private static string GetAppHostStoppedSuccessfullySuffix()
+    {
+        const string appHostMarker = "__AspireAppHost__";
+
+        var formattedMessage = string.Format(CultureInfo.CurrentCulture, StopCommandStrings.AppHostStoppedSuccessfully, appHostMarker);
+        var markerIndex = formattedMessage.IndexOf(appHostMarker, StringComparison.Ordinal);
+        var suffixStart = markerIndex + appHostMarker.Length;
+        if (markerIndex < 0 || suffixStart == formattedMessage.Length)
+        {
+            throw new InvalidOperationException($"Unable to derive a waitable suffix from {nameof(StopCommandStrings.AppHostStoppedSuccessfully)}.");
+        }
+
+        return formattedMessage[suffixStart..];
+    }
+
+    /// <summary>
+    /// Creates a C# empty AppHost using the direct <c>aspire new aspire-empty</c> command.
+    /// Handles CLI versions where C# is implicit and newer versions that prompt for the AppHost language.
+    /// </summary>
+    internal static async Task AspireNewCSharpEmptyAppHostAsync(
+        this Hex1bTerminalAutomator auto,
+        string projectName,
+        SequenceCounter counter,
+        string? outputPath = null,
+        string? channel = null,
+        bool useLocalhostTld = false,
+        TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromMinutes(2);
+        var command = BuildAspireNewEmptyAppHostCommand(
+            "aspire-empty",
+            projectName,
+            outputPath,
+            channel,
+            useLocalhostTld);
+
+        await auto.TypeAsync(command);
+        await auto.EnterAsync();
+        await auto.WaitForAspireNewEmptyAppHostCompletionAsync(
+            projectName,
+            "C#",
+            counter,
+            AppHostLanguagePromptSelection.DefaultCSharp,
+            effectiveTimeout);
+    }
+
+    /// <summary>
+    /// Creates a TypeScript empty AppHost using the direct <c>aspire new aspire-ts-empty</c> command.
+    /// </summary>
+    internal static async Task AspireNewTypeScriptEmptyAppHostAsync(
+        this Hex1bTerminalAutomator auto,
+        string projectName,
+        SequenceCounter counter,
+        string? outputPath = null,
+        string? channel = null,
+        bool useLocalhostTld = false,
+        TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromMinutes(2);
+        var command = BuildAspireNewEmptyAppHostCommand(
+            "aspire-ts-empty",
+            projectName,
+            outputPath,
+            channel,
+            useLocalhostTld);
+
+        await auto.TypeAsync(command);
+        await auto.EnterAsync();
+        await auto.WaitForAspireNewEmptyAppHostCompletionAsync(
+            projectName,
+            "TypeScript",
+            counter,
+            AppHostLanguagePromptSelection.TypeScript,
+            effectiveTimeout);
+    }
+
+    private static string BuildAspireNewEmptyAppHostCommand(
+        string templateName,
+        string projectName,
+        string? outputPath,
+        string? channel,
+        bool useLocalhostTld)
+    {
+        var output = string.IsNullOrWhiteSpace(outputPath) ? projectName : outputPath;
+        var channelArgument = string.IsNullOrWhiteSpace(channel)
+            ? string.Empty
+            : $" --channel {AspireCliShellCommandHelpers.QuoteBashArg(channel)}";
+        var localhostTldValue = useLocalhostTld ? "true" : "false";
+
+        return
+            $"aspire new {AspireCliShellCommandHelpers.QuoteBashArg(templateName)} " +
+            $"--name {AspireCliShellCommandHelpers.QuoteBashArg(projectName)} " +
+            $"--output {AspireCliShellCommandHelpers.QuoteBashArg(output)}" +
+            $"{channelArgument} --localhost-tld {localhostTldValue}";
+    }
+
+    private static async Task WaitForAspireNewEmptyAppHostCompletionAsync(
+        this Hex1bTerminalAutomator auto,
+        string projectName,
+        string languageDisplayName,
+        SequenceCounter counter,
+        AppHostLanguagePromptSelection languagePromptSelection,
+        TimeSpan effectiveTimeout)
+    {
+        var languagePrompt = new CellPatternSearcher()
+            .Find("Which language would you like to use?");
+        var agentInitPrompt = new CellPatternSearcher()
+            .Find("configure AI agent environments");
+        var result = AspireNewEmptyAppHostResult.None;
+
+        await auto.WaitUntilAsync(snapshot =>
+        {
+            if (languagePrompt.Search(snapshot).Count > 0)
+            {
+                result = AspireNewEmptyAppHostResult.LanguagePrompt;
+                return true;
+            }
+
+            if (agentInitPrompt.Search(snapshot).Count > 0)
+            {
+                result = AspireNewEmptyAppHostResult.AgentInitPrompt;
+                return true;
+            }
+
+            var successPrompt = new CellPatternSearcher()
+                .FindPattern(counter.Value.ToString())
+                .RightText(" OK] $ ");
+            if (successPrompt.Search(snapshot).Count > 0)
+            {
+                result = AspireNewEmptyAppHostResult.SuccessPrompt;
+                return true;
+            }
+
+            var errorPrompt = new CellPatternSearcher()
+                .FindPattern(counter.Value.ToString())
+                .RightText(" ERR:");
+            if (errorPrompt.Search(snapshot).Count > 0)
+            {
+                result = AspireNewEmptyAppHostResult.ErrorPrompt;
+                return true;
+            }
+
+            return false;
+        }, timeout: effectiveTimeout, description: $"{languageDisplayName} empty AppHost creation prompt or completion");
+
+        switch (result)
+        {
+            case AspireNewEmptyAppHostResult.LanguagePrompt:
+                await auto.SelectAppHostLanguageAsync(languagePromptSelection);
+                await auto.DeclineAgentInitPromptAsync(counter, effectiveTimeout);
+                return;
+
+            case AspireNewEmptyAppHostResult.AgentInitPrompt:
+                await auto.DeclineAgentInitPromptAsync(counter, effectiveTimeout);
+                return;
+
+            case AspireNewEmptyAppHostResult.SuccessPrompt:
+                counter.Increment();
+                return;
+
+            case AspireNewEmptyAppHostResult.ErrorPrompt:
+                throw new InvalidOperationException($"aspire new failed while creating {languageDisplayName} empty AppHost project '{projectName}'.");
+
+            default:
+                throw new InvalidOperationException($"Unexpected aspire new result while creating {languageDisplayName} empty AppHost project '{projectName}': {result}.");
+        }
+    }
+
+    private static async Task SelectAppHostLanguageAsync(
+        this Hex1bTerminalAutomator auto,
+        AppHostLanguagePromptSelection languagePromptSelection)
+    {
+        switch (languagePromptSelection)
+        {
+            case AppHostLanguagePromptSelection.DefaultCSharp:
+                await auto.EnterAsync();
+                return;
+
+            case AppHostLanguagePromptSelection.TypeScript:
+                await auto.DownAsync();
+                await auto.WaitUntilAsync(
+                    s => new CellPatternSearcher().Find("> TypeScript (Node.js)").Search(s).Count > 0,
+                    timeout: TimeSpan.FromSeconds(5),
+                    description: "TypeScript AppHost language selected");
+                await auto.EnterAsync();
+                return;
+
+            default:
+                throw new InvalidOperationException($"Unexpected AppHost language prompt selection: {languagePromptSelection}.");
+        }
+    }
+
+    /// <summary>
+    /// Handles <c>aspire add</c> completing directly or stopping on a version selection prompt.
+    /// </summary>
+    internal static async Task WaitForAspireAddSuccessAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter,
+        TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(180);
+        var versionPickerShown = false;
+        var versionPicker = new CellPatternSearcher()
+            .Find("(based on NuGet.config)");
+
+        await auto.WaitUntilAsync(snapshot =>
+        {
+            if (versionPicker.Search(snapshot).Count > 0)
+            {
+                versionPickerShown = true;
+                return true;
+            }
+
+            var successPrompt = new CellPatternSearcher()
+                .FindPattern(counter.Value.ToString())
+                .RightText(" OK] $ ");
+
+            return successPrompt.Search(snapshot).Count > 0;
+        }, timeout: effectiveTimeout, description: $"aspire add completion or version picker [{counter.Value} OK] $");
+
+        if (versionPickerShown)
+        {
+            await auto.EnterAsync();
+            await auto.WaitForSuccessPromptAsync(counter, effectiveTimeout);
+            return;
+        }
+
+        counter.Increment();
     }
 
     /// <summary>
@@ -179,10 +385,14 @@ internal static class CliE2EAutomatorHelpers
         switch (strategy.Mode)
         {
             case CliInstallMode.LocalHive:
-                var archivePath = QuoteBashArg(strategy.ArchivePath ?? throw new InvalidOperationException("LocalHive strategy is missing the archive path."));
+                var archivePath = strategy.ArchivePath ?? throw new InvalidOperationException("LocalHive strategy is missing the archive path.");
                 await auto.ExtractLocalHiveArchiveAsync(archivePath, counter);
                 await auto.SourceAspireCliEnvironmentAsync(counter);
                 await auto.ConfigureLocalHiveAsync(counter);
+                break;
+
+            case CliInstallMode.Preinstalled:
+                await auto.SourceAspireCliEnvironmentAsync(counter);
                 break;
 
             case CliInstallMode.PullRequest:
@@ -191,77 +401,135 @@ internal static class CliE2EAutomatorHelpers
                 await auto.SourceAspireCliEnvironmentAsync(counter);
                 break;
 
-            case CliInstallMode.InstallScript:
-                var getAspireCliScript = QuoteBashArg(Path.Combine(CliE2ETestHelpers.GetRepoRoot(), "eng", "scripts", "get-aspire-cli.sh"));
-                await auto.RunCommandFailFastAsync($"bash {getAspireCliScript}{GetInstallScriptArgs(strategy)}", counter, TimeSpan.FromSeconds(120));
+            case CliInstallMode.LocalArchive:
+                var archiveDir = strategy.ArchiveDir ?? throw new InvalidOperationException("LocalArchive strategy is missing the archive directory.");
+                var localDirPrScript = AspireCliShellCommandHelpers.QuoteBashArg(Path.Combine(CliE2ETestHelpers.GetRepoRoot(), "eng", "scripts", "get-aspire-cli-pr.sh"));
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetLocalArchiveInstallCommand(archiveDir, $"bash {localDirPrScript}"),
+                    counter,
+                    TimeSpan.FromSeconds(120));
                 await auto.SourceAspireCliEnvironmentAsync(counter);
                 break;
+
+            case CliInstallMode.InstallScript:
+                var getAspireCliScript = AspireCliShellCommandHelpers.QuoteBashArg(Path.Combine(CliE2ETestHelpers.GetRepoRoot(), "eng", "scripts", "get-aspire-cli.sh"));
+                await auto.RunCommandFailFastAsync(
+                    AspireCliShellCommandHelpers.GetInstallScriptCommand(strategy, $"bash {getAspireCliScript}"),
+                    counter,
+                    TimeSpan.FromSeconds(120));
+                await auto.SourceAspireCliEnvironmentAsync(counter);
+                break;
+
+            case CliInstallMode.DotnetTool:
+                throw new InvalidOperationException(
+                    "DotnetTool CLI mode is only supported in Docker test environments. " +
+                    "Use CreateDockerTestTerminal instead of CreateTestTerminal to avoid mutating the host machine.");
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(strategy), strategy.Mode, "Unknown install mode");
         }
 
-        await auto.LogInstalledAspireCliVersionAsync(counter);
+        await auto.VerifyAspireCliVersionAsync(strategy, counter);
     }
 
     /// <summary>
-    /// Completes an <c>aspire add</c> command whether it finishes directly or shows a version selection prompt first.
+    /// Verifies the installed Aspire CLI version matches the expected version from the install strategy.
+    /// When <see cref="CliInstallStrategy.ExpectedVersion"/> is set, runs <c>aspire --version</c> and asserts
+    /// an exact match (stripping build metadata like <c>+commit</c>).
+    /// On CI with <see cref="CliInstallMode.LocalArchive"/>, fails hard if no expected version could be determined.
+    /// Otherwise, just logs the installed version for diagnostics.
     /// </summary>
-    internal static async Task WaitForAspireAddSuccessAsync(
+    internal static async Task VerifyAspireCliVersionAsync(
         this Hex1bTerminalAutomator auto,
-        SequenceCounter counter,
-        TimeSpan? timeout = null)
-    {
-        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(180);
-        var sawVersionPrompt = false;
-
-        await auto.WaitUntilAsync(snapshot =>
-        {
-            var versionPromptSearcher = new CellPatternSearcher().Find("(based on NuGet.config)");
-            if (versionPromptSearcher.Search(snapshot).Count > 0)
-            {
-                sawVersionPrompt = true;
-                return true;
-            }
-
-            var successSearcher = new CellPatternSearcher()
-                .FindPattern(counter.Value.ToString())
-                .RightText(" OK] $ ");
-            var errorSearcher = new CellPatternSearcher()
-                .FindPattern(counter.Value.ToString())
-                .RightText(" ERR:");
-
-            return successSearcher.Search(snapshot).Count > 0 || errorSearcher.Search(snapshot).Count > 0;
-        }, timeout: effectiveTimeout, description: $"aspire add completion or version prompt [{counter.Value}]");
-
-        if (sawVersionPrompt)
-        {
-            await auto.EnterAsync();
-        }
-
-        await auto.WaitForSuccessPromptAsync(counter, effectiveTimeout);
-    }
-
-    /// <summary>
-    /// Mounts the workspace-local Aspire package hive into the standard local hive path inside Docker.
-    /// Used for SourceBuild E2E runs where the CLI binary is local but package resolution still needs
-    /// locally packed Aspire packages.
-    /// </summary>
-    internal static async Task MountLocalChannelPackagesAsync(
-        this Hex1bTerminalAutomator auto,
-        CliE2ETestHelpers.LocalChannelInfo? localChannel,
-        TemporaryWorkspace workspace,
+        CliInstallStrategy strategy,
         SequenceCounter counter)
     {
-        if (localChannel is null)
+        var expectedVersion = strategy.ExpectedVersion;
+        var recordVersionCommand = GetRecordAspireCliVersionCommand(strategy, "VER", "BASE_VER");
+
+        if (expectedVersion is null)
         {
+            if (CliE2ETestHelpers.IsRunningInCI && strategy.Mode is CliInstallMode.LocalArchive)
+            {
+                Assert.Fail(
+                    "Running on CI with LocalArchive mode but could not extract expected CLI version " +
+                    $"from Aspire.Cli.*.nupkg in the archive directory ({strategy.ArchiveDir}). " +
+                    "This may indicate the nupkg was not included in the archive or the copy step failed.");
+            }
+
+            // No version to verify — just log for diagnostics
+            await auto.TypeAsync(
+                $"VER=$(aspire --version 2>/dev/null) && BASE_VER=${{VER%%+*}} && echo \"$VER\" && {recordVersionCommand}");
+            await auto.EnterAsync();
+            await auto.WaitForSuccessPromptAsync(counter, TimeSpan.FromSeconds(30));
             return;
         }
 
-        var containerLocalChannelPackagesPath = CliE2ETestHelpers.ToContainerPath(localChannel.PackagesPath, workspace);
-        await auto.TypeAsync($"mkdir -p ~/.aspire/hives/local && rm -rf ~/.aspire/hives/local/packages && ln -s '{containerLocalChannelPackagesPath}' ~/.aspire/hives/local/packages");
+        // Run bash version comparison: get installed version, strip +commit build metadata, compare
+        await auto.TypeAsync(
+            $"VER=$(aspire --version 2>/dev/null) && BASE_VER=${{VER%%+*}} && " +
+            $"[ \"$BASE_VER\" = \"{expectedVersion}\" ] && " +
+            $"echo \"CLI_VERSION_EXACT:$VER\" || " +
+            $"echo \"CLI_VERSION_MISMATCH:expected={expectedVersion} actual=$VER\"; " +
+            recordVersionCommand);
         await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
+
+        var foundExact = false;
+        await auto.WaitUntilAsync(
+            snapshot =>
+            {
+                if (new CellPatternSearcher().Find("CLI_VERSION_EXACT:").Search(snapshot).Count > 0)
+                {
+                    foundExact = true;
+                    return true;
+                }
+
+                return new CellPatternSearcher().Find("CLI_VERSION_MISMATCH:").Search(snapshot).Count > 0;
+            },
+            timeout: TimeSpan.FromSeconds(30),
+            description: "CLI version verification");
+
+        await auto.WaitForAnyPromptAsync(counter);
+
+        Assert.True(foundExact,
+            $"Aspire CLI version mismatch. Expected '{expectedVersion}' (from {strategy.Mode}) " +
+            "but got a different version. This may indicate the wrong CLI binary was installed.");
+    }
+
+    internal static string GetRecordAspireCliVersionCommand(
+        CliInstallStrategy strategy,
+        string versionVariableName,
+        string baseVersionVariableName)
+    {
+        var requestedVersion = strategy.ExpectedVersion ?? strategy.Version ?? "";
+        var testName = GetCurrentTestName();
+
+        return
+            "if [ -n \"${ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR:-}\" ]; then " +
+            "if mkdir -p \"$ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR\" && " +
+            "CLI_VERSION_RECORD=\"$ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR/$(date +%s%N)-$$.env\" && " +
+            "{ " +
+            $"printf '%s\\n' {AspireCliShellCommandHelpers.QuoteBashArg($"test={testName}")}; " +
+            $"printf '%s\\n' {AspireCliShellCommandHelpers.QuoteBashArg($"mode={strategy.Mode}")}; " +
+            $"printf '%s\\n' {AspireCliShellCommandHelpers.QuoteBashArg($"strategy={strategy}")}; " +
+            $"printf '%s\\n' {AspireCliShellCommandHelpers.QuoteBashArg($"expected={requestedVersion}")}; " +
+            $"printf 'version=%s\\n' \"${versionVariableName}\"; " +
+            $"printf 'baseVersion=%s\\n' \"${baseVersionVariableName}\"; " +
+            "} > \"$CLI_VERSION_RECORD\"; then " +
+            "echo \"CLI_VERSION_RECORDED:$CLI_VERSION_RECORD\"; " +
+            "else " +
+            "echo \"CLI_VERSION_RECORD_FAILED:$ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR\"; " +
+            "fi; " +
+            "fi";
+    }
+
+    private static string GetCurrentTestName()
+    {
+        var testCase = TestContext.Current.TestCase;
+
+        return testCase is null
+            ? "unknown"
+            : $"{testCase.TestClassName}.{testCase.TestMethodName}";
     }
 
     /// <summary>
@@ -273,28 +541,8 @@ internal static class CliE2EAutomatorHelpers
         TemporaryWorkspace workspace,
         SequenceCounter counter)
     {
-        var waitingForInputPattern = new CellPatternSearcher()
-            .Find("b").RightUntil("$").Right(' ').Right(' ');
-
-        await auto.WaitUntilAsync(
-            s => waitingForInputPattern.Search(s).Count > 0,
-            timeout: TimeSpan.FromSeconds(10),
-            description: "initial bash prompt");
-        await auto.WaitAsync(500);
-
-        // Use the same numbered prompt contract as the Docker helpers so the same wait helpers work in both modes.
-        const string promptSetup = "CMDCOUNT=0; PROMPT_COMMAND='s=$?;((CMDCOUNT++));PS1=\"[$CMDCOUNT $([ $s -eq 0 ] && echo OK || echo ERR:$s)] \\$ \"'";
-        await auto.TypeAsync(promptSetup);
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
-
-        await auto.TypeAsync($"cd {workspace.WorkspaceRoot.FullName}");
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
-
-        await auto.TypeAsync($"export ASPIRE_E2E_WORKSPACE=\"{workspace.WorkspaceRoot.FullName}\"");
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter);
+        await auto.PrepareBashEnvironmentAsync(workspace.WorkspaceRoot.FullName, counter, TimeSpan.FromSeconds(10));
+        await auto.RunCommandAsync($"export ASPIRE_E2E_WORKSPACE={AspireCliShellCommandHelpers.QuoteBashArg(workspace.WorkspaceRoot.FullName)}", counter);
 
         if (!CliE2ETestHelpers.IsRunningInCI && ShouldPreserveLocalWorkspace())
         {
@@ -303,12 +551,11 @@ internal static class CliE2EAutomatorHelpers
 
         if (ShouldCaptureWorkspaceDiagnostics())
         {
-            await auto.TypeAsync(
+            await auto.RunCommandAsync(
                 "trap 'if [ -n \"$ASPIRE_E2E_WORKSPACE\" ]; then " +
                 BuildAspireDiagnosticsCaptureCommand("$ASPIRE_E2E_WORKSPACE") +
-                "fi' EXIT");
-            await auto.EnterAsync();
-            await auto.WaitForSuccessPromptAsync(counter);
+                "fi' EXIT",
+                counter);
         }
     }
 
@@ -320,7 +567,7 @@ internal static class CliE2EAutomatorHelpers
         int prNumber,
         SequenceCounter counter)
     {
-        var command = $"curl -fsSL https://raw.githubusercontent.com/microsoft/aspire/main/eng/scripts/get-aspire-cli-pr.sh | bash -s -- {GetPullRequestInstallArgs(prNumber)}";
+        var command = AspireCliShellCommandHelpers.GetPullRequestInstallCommand(prNumber, AspireCliShellCommandHelpers.MainPullRequestInstallCommandPrefix);
         await auto.RunCommandFailFastAsync(command, counter, TimeSpan.FromSeconds(300));
     }
 
@@ -331,7 +578,7 @@ internal static class CliE2EAutomatorHelpers
         this Hex1bTerminalAutomator auto,
         SequenceCounter counter)
     {
-        await auto.RunCommandAsync("export PATH=~/.aspire/bin:$PATH ASPIRE_PLAYGROUND=true TERM=xterm DOTNET_CLI_TELEMETRY_OPTOUT=true DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true DOTNET_GENERATE_ASPNET_CERTIFICATE=false", counter);
+        await auto.SourceAspireEnvironmentAsync(counter);
     }
 
     /// <summary>
@@ -364,6 +611,16 @@ internal static class CliE2EAutomatorHelpers
         await auto.WaitForSuccessPromptAsync(counter);
     }
 
+    internal static async Task VerifyPullRequestCliVersionAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter)
+    {
+        if (CliE2ETestHelpers.TryGetPullRequestHeadSha(out var commitSha))
+        {
+            await auto.VerifyAspireCliVersionAsync(commitSha, counter);
+        }
+    }
+
     private static string GetExpectedStableVersionMarker()
     {
         var versionsPropsPath = Path.Combine(CliE2ETestHelpers.GetRepoRoot(), "eng", "Versions.props");
@@ -377,44 +634,6 @@ internal static class CliE2EAutomatorHelpers
             : throw new InvalidOperationException($"Could not determine Aspire version marker from '{versionsPropsPath}'.");
     }
 
-    private static string GetInstallScriptArgs(CliInstallStrategy strategy)
-    {
-        if (strategy.Quality is not null)
-        {
-            return $" --quality {strategy.Quality.Value.ToString().ToLowerInvariant()}";
-        }
-
-        return strategy.Version is not null
-            ? $" --version {strategy.Version}"
-            : "";
-    }
-
-    private static string QuoteBashArg(string value)
-    {
-        return $"'{value.Replace("'", "'\"'\"'")}'";
-    }
-
-    /// <summary>
-    /// Installs the Aspire CLI and bundle from PR build artifacts, using the PR head SHA to fetch the install script.
-    /// </summary>
-    internal static async Task InstallAspireBundleFromPullRequestAsync(
-        this Hex1bTerminalAutomator auto,
-        int prNumber,
-        SequenceCounter counter)
-    {
-        var command = $"ref=$(gh api repos/microsoft/aspire/pulls/{prNumber} --jq '.head.sha') && curl -fsSL https://raw.githubusercontent.com/microsoft/aspire/$ref/eng/scripts/get-aspire-cli-pr.sh | bash -s -- {GetPullRequestInstallArgs(prNumber)}";
-        await auto.RunCommandFailFastAsync(command, counter, TimeSpan.FromSeconds(300));
-    }
-
-    internal static string GetPullRequestInstallArgs(int prNumber)
-    {
-        var workflowRunId = CliE2ETestHelpers.GetCliArchiveWorkflowRunId();
-
-        return workflowRunId is null
-            ? prNumber.ToString(CultureInfo.InvariantCulture)
-            : $"{prNumber.ToString(CultureInfo.InvariantCulture)} --run-id {workflowRunId}";
-    }
-
     /// <summary>
     /// Configures the PATH and environment variables for the Aspire CLI bundle in a non-Docker environment.
     /// Unlike <see cref="SourceAspireCliEnvironmentAsync"/>, this includes <c>~/.aspire</c> in PATH for bundle tools.
@@ -423,7 +642,21 @@ internal static class CliE2EAutomatorHelpers
         this Hex1bTerminalAutomator auto,
         SequenceCounter counter)
     {
-        await auto.RunCommandAsync("export PATH=~/.aspire/bin:~/.aspire:$PATH ASPIRE_PLAYGROUND=true TERM=xterm DOTNET_CLI_TELEMETRY_OPTOUT=true DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true DOTNET_GENERATE_ASPNET_CERTIFICATE=false", counter);
+        await auto.SourceAspireEnvironmentAsync(counter, includeBundlePath: true);
+    }
+
+    /// <summary>
+    /// Configures the PATH and environment variables for the Aspire CLI installed via <c>dotnet tool install</c>.
+    /// Adds <c>~/.dotnet/tools</c> to PATH and sets the standard Aspire environment variables.
+    /// </summary>
+    internal static async Task SourceDotnetToolEnvironmentAsync(
+        this Hex1bTerminalAutomator auto,
+        SequenceCounter counter)
+    {
+        await auto.RunCommandAsync(
+            $"export PATH=~/.dotnet/tools:$PATH {AspireCliShellCommandHelpers.CommonAspireEnvironmentAssignments}",
+            counter,
+            TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -469,53 +702,10 @@ internal static class CliE2EAutomatorHelpers
         string version,
         SequenceCounter counter)
     {
-        var command = $"curl -fsSL https://raw.githubusercontent.com/microsoft/aspire/main/eng/scripts/get-aspire-cli.sh | bash -s -- --version \"{version}\"";
+        var command = AspireCliShellCommandHelpers.GetInstallScriptCommand(
+            CliInstallStrategy.FromVersion(version),
+            AspireCliShellCommandHelpers.MainInstallScriptCommandPrefix);
         await auto.RunCommandFailFastAsync(command, counter, TimeSpan.FromSeconds(300));
-    }
-
-    private static async Task ExtractLocalHiveArchiveAsync(
-        this Hex1bTerminalAutomator auto,
-        string archivePath,
-        SequenceCounter counter)
-    {
-        await auto.RunCommandAsync($"mkdir -p ~/.aspire && tar -xzf {archivePath} -C ~/.aspire 2>/dev/null", counter, TimeSpan.FromSeconds(30));
-    }
-
-    private static async Task ConfigureLocalHiveAsync(
-        this Hex1bTerminalAutomator auto,
-        SequenceCounter counter)
-    {
-        await auto.RunCommandAsync("aspire config set channel local -g", counter);
-        await auto.RunCommandAsync("SDK_VER=$(ls ~/.aspire/hives/local/packages/Aspire.Hosting.*.nupkg 2>/dev/null | head -1 | sed 's/.*Aspire\\.Hosting\\.//;s/\\.nupkg//') && aspire config set sdk.version \"$SDK_VER\" -g", counter);
-    }
-
-    private static async Task LogInstalledAspireCliVersionAsync(
-        this Hex1bTerminalAutomator auto,
-        SequenceCounter counter)
-    {
-        await auto.RunCommandAsync("aspire --version", counter);
-    }
-
-    private static async Task RunCommandAsync(
-        this Hex1bTerminalAutomator auto,
-        string command,
-        SequenceCounter counter,
-        TimeSpan? timeout = null)
-    {
-        await auto.TypeAsync(command);
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptAsync(counter, timeout);
-    }
-
-    private static async Task RunCommandFailFastAsync(
-        this Hex1bTerminalAutomator auto,
-        string command,
-        SequenceCounter counter,
-        TimeSpan timeout)
-    {
-        await auto.TypeAsync(command);
-        await auto.EnterAsync();
-        await auto.WaitForSuccessPromptFailFastAsync(counter, timeout);
     }
 
     /// <summary>
@@ -528,7 +718,8 @@ internal static class CliE2EAutomatorHelpers
     internal static async Task AspireStartAsync(
         this Hex1bTerminalAutomator auto,
         SequenceCounter counter,
-        TimeSpan? startTimeout = null)
+        TimeSpan? startTimeout = null,
+        bool isolated = false)
     {
         var effectiveTimeout = startTimeout ?? TimeSpan.FromMinutes(3);
         var expectedCounter = counter.Value;
@@ -538,9 +729,11 @@ internal static class CliE2EAutomatorHelpers
             ? AspireStartJsonFile
             : "$ASPIRE_E2E_WORKSPACE/_aspire-start.json";
 
+        var isolatedFlag = isolated ? " --isolated" : "";
+
         // Keep aspire start as a single shell pipeline so tee captures the exact JSON emitted to the terminal while
         // pipefail preserves the real CLI exit code instead of letting tee mask build/startup failures.
-        await auto.TypeAsync($"(set -o pipefail; aspire start --format json | tee \"{jsonFile}\")");
+        await auto.TypeAsync($"(set -o pipefail; aspire start{isolatedFlag} --format json | tee \"{jsonFile}\")");
         await auto.EnterAsync();
 
         // Wait for the command to finish — check for success or error exit.
@@ -840,5 +1033,20 @@ internal static class CliE2EAutomatorHelpers
     private static bool ShouldCaptureWorkspaceDiagnostics()
     {
         return CliE2ETestHelpers.IsRunningInCI || ShouldPreserveLocalWorkspace();
+    }
+
+    private enum AspireNewEmptyAppHostResult
+    {
+        None,
+        LanguagePrompt,
+        AgentInitPrompt,
+        SuccessPrompt,
+        ErrorPrompt
+    }
+
+    private enum AppHostLanguagePromptSelection
+    {
+        DefaultCSharp,
+        TypeScript
     }
 }

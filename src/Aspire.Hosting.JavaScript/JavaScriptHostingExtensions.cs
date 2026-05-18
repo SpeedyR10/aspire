@@ -355,7 +355,7 @@ public static class JavaScriptHostingExtensions
     /// To add an API reverse-proxy, use the overload that accepts an <c>apiPath</c> and <c>apiTarget</c>.
     /// </para>
     /// </remarks>
-    [Experimental("ASPIREEXTENSION001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExportIgnore(Reason = "Use the polyglot-compatible overload instead.")]
     public static IResourceBuilder<TResource> PublishAsStaticWebsite<TResource>(
         this IResourceBuilder<TResource> builder,
@@ -390,7 +390,7 @@ public static class JavaScriptHostingExtensions
     /// work correctly across all deployment targets (Docker Compose, Azure App Service, etc.).
     /// </para>
     /// </remarks>
-    [Experimental("ASPIREEXTENSION001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExportIgnore(Reason = "Use the polyglot-compatible overload instead.")]
     public static IResourceBuilder<TResource> PublishAsStaticWebsite<TResource>(
         this IResourceBuilder<TResource> builder,
@@ -410,6 +410,7 @@ public static class JavaScriptHostingExtensions
     /// in a single options object rather than positional args.
     /// </summary>
 #pragma warning disable ASPIREEXPORT009 // Polyglot entry point — collision is intentional
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExport("publishAsStaticWebsite", Description = "Publishes the JavaScript application as a standalone static website using YARP.")]
     internal static IResourceBuilder<TResource> PublishAsStaticWebsitePolyglot<TResource>(
 #pragma warning restore ASPIREEXPORT009
@@ -430,6 +431,7 @@ public static class JavaScriptHostingExtensions
         return PublishAsStaticWebsiteCore(builder, apiPath, apiTarget, options);
     }
 
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     private static IResourceBuilder<TResource> PublishAsStaticWebsiteCore<TResource>(
         IResourceBuilder<TResource> builder,
         string? apiPath,
@@ -542,6 +544,7 @@ public static class JavaScriptHostingExtensions
     /// the built output directory is copied into the runtime container, not the full application source.
     /// </para>
     /// </remarks>
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExport(Description = "Publishes the JavaScript application as a standalone Node.js server that runs a built artifact directly.")]
     public static IResourceBuilder<TResource> PublishAsNodeServer<TResource>(this IResourceBuilder<TResource> builder, string entryPoint, string outputPath = ".")
         where TResource : JavaScriptAppResource
@@ -605,6 +608,7 @@ public static class JavaScriptHostingExtensions
     /// use <see cref="PublishAsNodeServer{TResource}"/> instead for a smaller runtime image.
     /// </para>
     /// </remarks>
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExport(Description = "Publishes the JavaScript application as a Node.js server that uses a package manager script at runtime.")]
     public static IResourceBuilder<TResource> PublishAsNpmScript<TResource>(this IResourceBuilder<TResource> builder, string startScriptName = "start", string? runScriptArguments = null)
         where TResource : JavaScriptAppResource
@@ -1084,6 +1088,7 @@ public static class JavaScriptHostingExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExport(Description = "Adds a Next.js application resource")]
     public static IResourceBuilder<NextJsAppResource> AddNextJsApp(this IDistributedApplicationBuilder builder, [ResourceName] string name, string appDirectory, string runScriptName = "dev")
     {
@@ -1170,6 +1175,7 @@ public static class JavaScriptHostingExtensions
     /// to suppress those checks when the configuration is set dynamically or via an external
     /// mechanism that cannot be detected by static file inspection.
     /// </remarks>
+    [Experimental("ASPIREJAVASCRIPT001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     [AspireExport(Description = "Disables deploy-time build validation checks for the Next.js application.")]
     public static IResourceBuilder<NextJsAppResource> DisableBuildValidation(this IResourceBuilder<NextJsAppResource> builder)
     {
@@ -1715,7 +1721,7 @@ public static class JavaScriptHostingExtensions
     private static string GetDefaultBaseImage(string appDirectory, string defaultSuffix, IServiceProvider serviceProvider)
     {
         var logger = serviceProvider.GetService<ILogger<JavaScriptAppResource>>() ?? NullLogger<JavaScriptAppResource>.Instance;
-        var nodeVersion = DetectNodeVersion(appDirectory, logger) ?? DefaultNodeVersion;
+        var nodeVersion = ResolveNodeVersion(appDirectory, logger);
         return $"node:{nodeVersion}-{defaultSuffix}";
     }
 
@@ -1831,13 +1837,31 @@ public static class JavaScriptHostingExtensions
     }
 
     /// <summary>
-    /// Detects the Node.js version to use for a project by checking common configuration files.
+    /// Resolves the Node.js version to use for a project by checking common configuration files.
     /// </summary>
     /// <param name="workingDirectory">The working directory of the Node.js project.</param>
     /// <param name="logger">The logger for diagnostic messages.</param>
-    /// <returns>The detected Node.js major version number as a string, or <c>null</c> if no version is detected.</returns>
-    private static string? DetectNodeVersion(string workingDirectory, ILogger logger)
+    /// <returns>The resolved Node.js major version number as a string.</returns>
+    private static string ResolveNodeVersion(string workingDirectory, ILogger logger)
     {
+        // Follow the same shape as Cloud Native Buildpacks-style tooling for Node selection:
+        // pinned toolchain files (.nvmrc, .node-version, .tool-versions) are treated as
+        // authoritative runtime intent, while package.json engines.node is compatibility
+        // metadata rather than a deployment image pin. If there is no explicit toolchain pin,
+        // generated Dockerfiles fall back to Aspire's preferred default Node major.
+        if (TryDetectPinnedNodeVersion(workingDirectory, logger, out var pinnedNodeVersion))
+        {
+            return pinnedNodeVersion;
+        }
+
+        logger.LogDebug("No Node.js version detected, using default version {DefaultVersion}", DefaultNodeVersion);
+        return DefaultNodeVersion;
+    }
+
+    private static bool TryDetectPinnedNodeVersion(string workingDirectory, ILogger logger, out string nodeVersion)
+    {
+        nodeVersion = string.Empty;
+
         // Check .nvmrc file
         var nvmrcPath = Path.Combine(workingDirectory, ".nvmrc");
         if (File.Exists(nvmrcPath))
@@ -1846,7 +1870,8 @@ public static class JavaScriptHostingExtensions
             if (TryParseNodeVersion(versionString, out var version))
             {
                 logger.LogDebug("Detected Node.js version {Version} from .nvmrc file", version);
-                return version;
+                nodeVersion = version;
+                return true;
             }
         }
 
@@ -1858,32 +1883,8 @@ public static class JavaScriptHostingExtensions
             if (TryParseNodeVersion(versionString, out var version))
             {
                 logger.LogDebug("Detected Node.js version {Version} from .node-version file", version);
-                return version;
-            }
-        }
-
-        // Check package.json for engines.node
-        var packageJsonPath = Path.Combine(workingDirectory, "package.json");
-        if (File.Exists(packageJsonPath))
-        {
-            try
-            {
-                using var stream = File.OpenRead(packageJsonPath);
-                using var packageJson = JsonDocument.Parse(stream);
-                if (packageJson.RootElement.TryGetProperty("engines", out var engines) &&
-                    engines.TryGetProperty("node", out var nodeVersion))
-                {
-                    var versionString = nodeVersion.GetString();
-                    if (!string.IsNullOrWhiteSpace(versionString) && TryParseNodeVersion(versionString, out var version))
-                    {
-                        logger.LogDebug("Detected Node.js version {Version} from package.json engines.node field", version);
-                        return version;
-                    }
-                }
-            }
-            catch
-            {
-                // If package.json parsing fails, continue to default
+                nodeVersion = version;
+                return true;
             }
         }
 
@@ -1895,22 +1896,22 @@ public static class JavaScriptHostingExtensions
             foreach (var line in lines)
             {
                 var trimmedLine = line.Trim();
-                if (trimmedLine.StartsWith("nodejs ", StringComparison.Ordinal) ||
-                    trimmedLine.StartsWith("node ", StringComparison.Ordinal))
+                var parts = trimmedLine.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 1 &&
+                    (string.Equals(parts[0], "nodejs", StringComparison.Ordinal) ||
+                     string.Equals(parts[0], "node", StringComparison.Ordinal)))
                 {
-                    var parts = trimmedLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length > 1 && TryParseNodeVersion(parts[1], out var version))
+                    if (TryParseNodeVersion(parts[1], out var version))
                     {
                         logger.LogDebug("Detected Node.js version {Version} from .tool-versions file", version);
-                        return version;
+                        nodeVersion = version;
+                        return true;
                     }
                 }
             }
         }
 
-        // Return null if no version is detected
-        logger.LogDebug("No Node.js version detected, using default version {DefaultVersion}", DefaultNodeVersion);
-        return null;
+        return false;
     }
 
     /// <summary>

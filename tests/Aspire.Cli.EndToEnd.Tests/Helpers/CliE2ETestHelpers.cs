@@ -17,15 +17,23 @@ namespace Aspire.Cli.EndToEnd.Tests.Helpers;
 /// </summary>
 internal static class CliE2ETestHelpers
 {
-    internal const string CliArchiveWorkflowRunIdEnvironmentVariableName = "ASPIRE_CLI_WORKFLOW_RUN_ID";
+    internal const string CliArchiveDirEnvironmentVariableName = CliInstallStrategy.CliArchiveDirEnvironmentVariableName;
+    internal const string DotNetImageEnvironmentVariableName = "ASPIRE_E2E_DOTNET_IMAGE";
+    internal const string RequireDotNetImageEnvironmentVariableName = "ASPIRE_E2E_REQUIRE_DOTNET_IMAGE";
+    internal const string PolyglotImageEnvironmentVariableName = "ASPIRE_E2E_POLYGLOT_IMAGE";
+    internal const string RequirePolyglotImageEnvironmentVariableName = "ASPIRE_E2E_REQUIRE_POLYGLOT_IMAGE";
+    internal const string PolyglotJavaImageEnvironmentVariableName = "ASPIRE_E2E_POLYGLOT_JAVA_IMAGE";
+    internal const string RequirePolyglotJavaImageEnvironmentVariableName = "ASPIRE_E2E_REQUIRE_POLYGLOT_JAVA_IMAGE";
+    internal const string CliVersionOutputDirEnvironmentVariableName = "ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR";
+    internal const string ContainerCliVersionOutputDir = "/tmp/aspire-cli-versions";
+    private static readonly Regex s_commitShaPattern = new("^[0-9a-fA-F]{40}$", RegexOptions.Compiled);
 
     /// <summary>
     /// Gets whether the tests are running in CI (GitHub Actions) vs locally.
     /// When running locally, some commands are replaced with echo stubs.
     /// </summary>
     internal static bool IsRunningInCI =>
-        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_PR_NUMBER")) &&
-        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_PR_HEAD_SHA"));
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"));
 
     /// <summary>
     /// Gets the PR number from the GITHUB_PR_NUMBER environment variable.
@@ -46,40 +54,31 @@ internal static class CliE2ETestHelpers
         return prNumber;
     }
 
-    /// <summary>
-    /// Gets the commit SHA from the GITHUB_PR_HEAD_SHA environment variable.
-    /// This is the actual PR head commit, not the merge commit (GITHUB_SHA).
-    /// When running locally (not in CI), returns a dummy value for testing.
-    /// </summary>
-    /// <returns>The commit SHA, or a dummy value when running locally.</returns>
-    internal static string GetRequiredCommitSha()
-    {
-        var commitSha = Environment.GetEnvironmentVariable("GITHUB_PR_HEAD_SHA");
+    internal static bool IsPullRequestContext =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_PR_NUMBER")) ||
+        string.Equals(Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME"), "pull_request", StringComparison.OrdinalIgnoreCase);
 
+    internal static bool TryGetPullRequestHeadSha(out string commitSha)
+    {
+        commitSha = string.Empty;
+
+        if (!IsPullRequestContext)
+        {
+            return false;
+        }
+
+        commitSha = Environment.GetEnvironmentVariable("GITHUB_PR_HEAD_SHA") ?? string.Empty;
         if (string.IsNullOrEmpty(commitSha))
         {
-            // Running locally - return dummy value
-            return "local0000";
+            throw new InvalidOperationException("GITHUB_PR_HEAD_SHA must be set when running CLI E2E tests in pull request context.");
         }
 
-        return commitSha;
-    }
-
-    /// <summary>
-    /// Gets the workflow run ID that produced the CLI archive for the current test run, if one was provided.
-    /// </summary>
-    /// <returns>The workflow run ID, or <see langword="null"/> when the current environment should resolve the PR run dynamically.</returns>
-    internal static string? GetCliArchiveWorkflowRunId()
-    {
-        var runId = Environment.GetEnvironmentVariable(CliArchiveWorkflowRunIdEnvironmentVariableName);
-
-        if (string.IsNullOrEmpty(runId))
+        if (!s_commitShaPattern.IsMatch(commitSha))
         {
-            return null;
+            throw new InvalidOperationException($"GITHUB_PR_HEAD_SHA must be a 40-character commit SHA, got: '{commitSha}'.");
         }
 
-        Assert.True(long.TryParse(runId, out _), $"{CliArchiveWorkflowRunIdEnvironmentVariableName} must be a valid integer, got: {runId}");
-        return runId;
+        return true;
     }
 
     /// <summary>
@@ -115,27 +114,6 @@ internal static class CliE2ETestHelpers
     }
 
     /// <summary>
-    /// Specifies how the Aspire CLI should be installed inside a Docker container.
-    /// </summary>
-    internal enum DockerInstallMode
-    {
-        /// <summary>
-        /// The CLI was built from source by the Dockerfile and is already on PATH.
-        /// </summary>
-        SourceBuild,
-
-        /// <summary>
-        /// Install the latest GA release from aspire.dev.
-        /// </summary>
-        GaRelease,
-
-        /// <summary>
-        /// Install from PR artifacts using the get-aspire-cli-pr.sh script.
-        /// </summary>
-        PullRequest,
-    }
-
-    /// <summary>
     /// Specifies which Dockerfile variant to use for the test container.
     /// </summary>
     internal enum DockerfileVariant
@@ -164,169 +142,6 @@ internal static class CliE2ETestHelpers
     private static bool s_podmanBaseImageBuilt;
 
     /// <summary>
-    /// Detects the install mode for Docker-based tests based on the current environment.
-    /// </summary>
-    /// <param name="repoRoot">The repo root directory on the host.</param>
-    /// <returns>The detected <see cref="DockerInstallMode"/>.</returns>
-    internal static DockerInstallMode DetectDockerInstallMode(string repoRoot)
-    {
-        if (IsRunningInCI)
-        {
-            return DockerInstallMode.PullRequest;
-        }
-
-        // Check if a locally-built native AOT CLI binary exists (developer has run ./build.sh --bundle).
-        var cliPublishDir = FindLocalCliBinary(repoRoot);
-        if (cliPublishDir is not null)
-        {
-            return DockerInstallMode.SourceBuild;
-        }
-
-        return DockerInstallMode.GaRelease;
-    }
-
-    /// <summary>
-    /// Finds the locally-built native AOT CLI publish directory.
-    /// Searches for the aspire binary under artifacts/bin/Aspire.Cli/*/net*/linux-x64/publish/.
-    /// </summary>
-    /// <returns>The publish directory path, or null if not found.</returns>
-    internal static string? FindLocalCliBinary(string repoRoot)
-    {
-        var cliBaseDir = Path.Combine(repoRoot, "artifacts", "bin", "Aspire.Cli");
-        if (!Directory.Exists(cliBaseDir))
-        {
-            return null;
-        }
-
-        // Search for the native AOT binary under any config/TFM combination.
-        var matches = Directory.GetFiles(cliBaseDir, "aspire", SearchOption.AllDirectories)
-            .Where(f => f.Contains("linux-x64") && f.Contains("publish"))
-            .ToArray();
-
-        return matches.Length > 0 ? Path.GetDirectoryName(matches[0]) : null;
-    }
-
-    /// <summary>
-    /// Creates a Hex1b terminal that runs inside a Docker container built from the shared E2E Dockerfile.
-    /// The Dockerfile builds the CLI from source (local dev) or accepts pre-built artifacts (CI).
-    /// </summary>
-    /// <param name="repoRoot">
-    /// The repo root directory, used as the Docker build context and to locate the shared test Dockerfiles.
-    /// This is required for every Docker-based CLI E2E mode, not just localhive, because the terminal always runs
-    /// inside a purpose-built test container even when the CLI itself is later installed from PR artifacts or scripts.
-    /// </param>
-    /// <param name="installMode">The detected install mode, controlling Docker build args and volumes.</param>
-    /// <param name="output">Test output helper for logging configuration details.</param>
-    /// <param name="variant">Which Dockerfile variant to use (DotNet or Polyglot).</param>
-    /// <param name="mountDockerSocket">Whether to mount the Docker socket for DCP/container access.</param>
-    /// <param name="workspace">Optional workspace to mount into the container at /workspace.</param>
-    /// <param name="width">Terminal width in columns.</param>
-    /// <param name="height">Terminal height in rows.</param>
-    /// <param name="testName">The test name for the recording file path.</param>
-    /// <returns>A configured <see cref="Hex1bTerminal"/>. Caller is responsible for disposal.</returns>
-    internal static Hex1bTerminal CreateDockerTestTerminal(
-        string repoRoot,
-        DockerInstallMode installMode,
-        ITestOutputHelper output,
-        DockerfileVariant variant = DockerfileVariant.DotNet,
-        bool mountDockerSocket = false,
-        TemporaryWorkspace? workspace = null,
-        IEnumerable<string>? additionalVolumes = null,
-        int width = 160,
-        int height = 48,
-        [CallerMemberName] string testName = "")
-    {
-        var recordingPath = GetTestResultsRecordingPath(testName);
-        RegisterCaptureFile("recording.cast", recordingPath);
-        var dockerfileName = variant switch
-        {
-            DockerfileVariant.DotNet => "Dockerfile.e2e",
-            DockerfileVariant.Polyglot => "Dockerfile.e2e-polyglot-base",
-            DockerfileVariant.PolyglotJava => "Dockerfile.e2e-polyglot-java",
-            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
-        };
-        var dockerfilePath = Path.Combine(repoRoot, "tests", "Shared", "Docker", dockerfileName);
-
-        if (variant is DockerfileVariant.PolyglotJava)
-        {
-            EnsurePolyglotBaseImage(repoRoot, output);
-        }
-
-        output.WriteLine($"Creating Docker test terminal:");
-        output.WriteLine($"  Test name:      {testName}");
-        output.WriteLine($"  Install mode:   {installMode}");
-        output.WriteLine($"  Variant:        {variant}");
-        output.WriteLine($"  Dockerfile:     {dockerfilePath}");
-        output.WriteLine($"  Workspace:      {workspace?.WorkspaceRoot.FullName ?? "(none)"}");
-        output.WriteLine($"  Docker socket:  {mountDockerSocket}");
-        output.WriteLine($"  Dimensions:     {width}x{height}");
-        output.WriteLine($"  Recording:      {recordingPath}");
-
-        var builder = Hex1bTerminal.CreateBuilder()
-            .WithHeadless()
-            .WithDimensions(width, height)
-            .WithAsciinemaRecording(recordingPath)
-            .WithDockerContainer(c =>
-            {
-                c.DockerfilePath = dockerfilePath;
-                c.BuildContext = repoRoot;
-
-                if (mountDockerSocket)
-                {
-                    c.MountDockerSocket = true;
-                }
-
-                if (workspace is not null)
-                {
-                    // Mount using the same directory name so that
-                    // workspace.WorkspaceRoot.Name matches inside the container
-                    // (e.g., aspire CLI uses the dir name as the default project name).
-                    c.Volumes.Add($"{workspace.WorkspaceRoot.FullName}:/workspace/{workspace.WorkspaceRoot.Name}");
-                }
-
-                if (additionalVolumes is not null)
-                {
-                    foreach (var volume in additionalVolumes)
-                    {
-                        c.Volumes.Add(volume);
-                    }
-                }
-
-                // Always skip the expensive source build inside Docker.
-                // For SourceBuild mode, the CLI is installed from a mounted local bundle.
-                // For PullRequest/GaRelease, it's installed via scripts after container start.
-                c.BuildArgs["SKIP_SOURCE_BUILD"] = "true";
-
-                if (installMode == DockerInstallMode.SourceBuild)
-                {
-                    // Mount the locally-built native AOT CLI binary into the container.
-                    var cliPublishDir = FindLocalCliBinary(repoRoot)
-                        ?? throw new InvalidOperationException("SourceBuild mode detected but CLI binary not found");
-                    c.Volumes.Add($"{cliPublishDir}:/opt/aspire-cli:ro");
-                    output.WriteLine($"  CLI binary:     {cliPublishDir}");
-                }
-
-                if (installMode == DockerInstallMode.PullRequest)
-                {
-                    var ghToken = Environment.GetEnvironmentVariable("GH_TOKEN");
-                    if (!string.IsNullOrEmpty(ghToken))
-                    {
-                        c.Environment["GH_TOKEN"] = ghToken;
-                    }
-
-                    var prNumber = Environment.GetEnvironmentVariable("GITHUB_PR_NUMBER") ?? "";
-                    var prSha = Environment.GetEnvironmentVariable("GITHUB_PR_HEAD_SHA") ?? "";
-                    c.Environment["GITHUB_PR_NUMBER"] = prNumber;
-                    c.Environment["GITHUB_PR_HEAD_SHA"] = prSha;
-                    output.WriteLine($"  PR number:      {prNumber}");
-                    output.WriteLine($"  PR head SHA:    {prSha}");
-                }
-            });
-
-        return builder.Build();
-    }
-
-    /// <summary>
     /// Creates a Hex1b terminal that runs inside a Docker container, configured using the
     /// given <see cref="CliInstallStrategy"/> for CLI installation.
     /// </summary>
@@ -349,16 +164,10 @@ internal static class CliE2ETestHelpers
     {
         var recordingPath = GetTestResultsRecordingPath(testName);
         RegisterCaptureFile("recording.cast", recordingPath);
-        var dockerfileName = variant switch
-        {
-            DockerfileVariant.DotNet => "Dockerfile.e2e",
-            DockerfileVariant.Polyglot => "Dockerfile.e2e-polyglot-base",
-            DockerfileVariant.PolyglotJava => "Dockerfile.e2e-polyglot-java",
-            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
-        };
-        var dockerfilePath = Path.Combine(repoRoot, "tests", "Shared", "Docker", dockerfileName);
+        var dockerfilePath = GetDockerfilePath(repoRoot, variant);
+        var prebuiltImageName = GetPrebuiltImageName(variant);
 
-        if (variant is DockerfileVariant.PolyglotJava)
+        if (variant is DockerfileVariant.PolyglotJava && prebuiltImageName is null)
         {
             EnsurePolyglotBaseImage(repoRoot, output);
         }
@@ -366,8 +175,10 @@ internal static class CliE2ETestHelpers
         output.WriteLine($"Creating Docker test terminal:");
         output.WriteLine($"  Test name:      {testName}");
         output.WriteLine($"  Strategy:       {strategy}");
+        output.WriteLine($"  Expected ver:   {strategy.ExpectedVersion ?? "(not available)"}");
         output.WriteLine($"  Variant:        {variant}");
-        output.WriteLine($"  Dockerfile:     {dockerfilePath}");
+        output.WriteLine($"  Dockerfile:     {(prebuiltImageName is null ? dockerfilePath : "(prebuilt image)")}");
+        output.WriteLine($"  Image:          {prebuiltImageName ?? "(build from Dockerfile)"}");
         output.WriteLine($"  Workspace:      {workspace?.WorkspaceRoot.FullName ?? "(none)"}");
         output.WriteLine($"  Docker socket:  {mountDockerSocket}");
         output.WriteLine($"  Dimensions:     {width}x{height}");
@@ -379,8 +190,7 @@ internal static class CliE2ETestHelpers
             .WithAsciinemaRecording(recordingPath)
             .WithDockerContainer(c =>
             {
-                c.DockerfilePath = dockerfilePath;
-                c.BuildContext = repoRoot;
+                ConfigureDockerContainerSource(c, repoRoot, variant);
 
                 if (mountDockerSocket)
                 {
@@ -392,6 +202,14 @@ internal static class CliE2ETestHelpers
                     c.Volumes.Add($"{workspace.WorkspaceRoot.FullName}:/workspace/{workspace.WorkspaceRoot.Name}");
                 }
 
+                var cliVersionOutputDir = Environment.GetEnvironmentVariable(CliVersionOutputDirEnvironmentVariableName);
+                if (!string.IsNullOrEmpty(cliVersionOutputDir))
+                {
+                    Directory.CreateDirectory(cliVersionOutputDir);
+                    c.Volumes.Add($"{cliVersionOutputDir}:{ContainerCliVersionOutputDir}");
+                    c.Environment[CliVersionOutputDirEnvironmentVariableName] = ContainerCliVersionOutputDir;
+                }
+
                 if (additionalVolumes is not null)
                 {
                     foreach (var volume in additionalVolumes)
@@ -400,11 +218,103 @@ internal static class CliE2ETestHelpers
                     }
                 }
 
-                // Delegate all mode-specific Docker config to the strategy
-                strategy.ConfigureContainer(c);
+                ConfigureDockerContainerStrategy(c, strategy, prebuiltImageSelected: prebuiltImageName is not null);
             });
 
         return builder.Build();
+    }
+
+    internal static void ConfigureDockerContainerStrategy(DockerContainerOptions options, CliInstallStrategy strategy, bool prebuiltImageSelected = false)
+    {
+        // Delegate all mode-specific Docker config to the strategy.
+        strategy.ConfigureContainer(options);
+
+        if (prebuiltImageSelected)
+        {
+            if (!string.IsNullOrEmpty(options.DockerfilePath) || !string.IsNullOrEmpty(options.BuildContext))
+            {
+                throw new InvalidOperationException("A prebuilt CLI E2E image was selected, but Dockerfile configuration was also set. Prebuilt-image runs must not fall back to Dockerfile builds.");
+            }
+
+            options.BuildArgs.Clear();
+        }
+    }
+
+    internal static void ConfigureDockerContainerSource(DockerContainerOptions options, string repoRoot, DockerfileVariant variant)
+    {
+        var prebuiltImageName = GetPrebuiltImageName(variant);
+        if (prebuiltImageName is not null)
+        {
+            options.Image = prebuiltImageName;
+            return;
+        }
+
+        if (variant is DockerfileVariant.DotNet && IsDotNetImageRequired())
+        {
+            throw new InvalidOperationException($"{DotNetImageEnvironmentVariableName} must be set when the prebuilt CLI E2E .NET image is required.");
+        }
+
+        if (variant is DockerfileVariant.Polyglot && IsPolyglotImageRequired())
+        {
+            throw new InvalidOperationException($"{PolyglotImageEnvironmentVariableName} must be set when the prebuilt CLI E2E polyglot image is required.");
+        }
+
+        if (variant is DockerfileVariant.PolyglotJava && IsPolyglotJavaImageRequired())
+        {
+            throw new InvalidOperationException($"{PolyglotJavaImageEnvironmentVariableName} must be set when the prebuilt CLI E2E Java image is required.");
+        }
+
+        options.DockerfilePath = GetDockerfilePath(repoRoot, variant);
+        options.BuildContext = repoRoot;
+    }
+
+    private static string? GetPrebuiltImageName(DockerfileVariant variant)
+    {
+        var environmentVariableName = variant switch
+        {
+            DockerfileVariant.DotNet => DotNetImageEnvironmentVariableName,
+            DockerfileVariant.Polyglot => PolyglotImageEnvironmentVariableName,
+            DockerfileVariant.PolyglotJava => PolyglotJavaImageEnvironmentVariableName,
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+
+        var imageName = Environment.GetEnvironmentVariable(environmentVariableName);
+        return string.IsNullOrWhiteSpace(imageName) ? null : imageName.Trim();
+    }
+
+    private static string GetDockerfilePath(string repoRoot, DockerfileVariant variant)
+    {
+        var dockerfileName = variant switch
+        {
+            DockerfileVariant.DotNet => "Dockerfile.e2e",
+            DockerfileVariant.Polyglot => "Dockerfile.e2e-polyglot-base",
+            DockerfileVariant.PolyglotJava => "Dockerfile.e2e-polyglot-java",
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+
+        return Path.Combine(repoRoot, "tests", "Shared", "Docker", dockerfileName);
+    }
+
+    private static bool IsDotNetImageRequired()
+    {
+        return IsImageRequired(RequireDotNetImageEnvironmentVariableName);
+    }
+
+    private static bool IsPolyglotImageRequired()
+    {
+        return IsImageRequired(RequirePolyglotImageEnvironmentVariableName);
+    }
+
+    private static bool IsPolyglotJavaImageRequired()
+    {
+        return IsImageRequired(RequirePolyglotJavaImageEnvironmentVariableName);
+    }
+
+    private static bool IsImageRequired(string environmentVariableName)
+    {
+        var value = Environment.GetEnvironmentVariable(environmentVariableName);
+        return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "1", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -493,6 +403,7 @@ internal static class CliE2ETestHelpers
             startInfo.ArgumentList.Add("--quiet");
             startInfo.ArgumentList.Add("--build-arg");
             startInfo.ArgumentList.Add("SKIP_SOURCE_BUILD=true");
+            AddUbuntuAptMirrorBuildArg(startInfo);
             startInfo.ArgumentList.Add("-f");
             startInfo.ArgumentList.Add(dockerfilePath);
             startInfo.ArgumentList.Add("-t");
@@ -542,6 +453,7 @@ internal static class CliE2ETestHelpers
 
             startInfo.ArgumentList.Add("build");
             startInfo.ArgumentList.Add("--quiet");
+            AddUbuntuAptMirrorBuildArg(startInfo);
             startInfo.ArgumentList.Add("-f");
             startInfo.ArgumentList.Add(dockerfilePath);
             startInfo.ArgumentList.Add("-t");
@@ -628,6 +540,18 @@ internal static class CliE2ETestHelpers
         return $"hex1b-test-{Guid.NewGuid():N}".Substring(0, 32);
     }
 
+    private static void AddUbuntuAptMirrorBuildArg(ProcessStartInfo startInfo)
+    {
+        var buildArgs = new Dictionary<string, string>();
+        CliInstallStrategy.ConfigureUbuntuAptMirrorBuildArg(buildArgs);
+
+        foreach (var (name, value) in buildArgs)
+        {
+            startInfo.ArgumentList.Add("--build-arg");
+            startInfo.ArgumentList.Add($"{name}={value}");
+        }
+    }
+
     /// <summary>
     /// Walks up from the test assembly directory to find the repo root (contains Aspire.slnx).
     /// </summary>
@@ -712,38 +636,76 @@ internal static class CliE2ETestHelpers
         return string.Equals(stabilize, "true", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static void RegisterCaptureFile(string fileName, string path)
+    {
+        if (TestContext.Current is null)
+        {
+            return;
+        }
+
+        TestContext.Current.KeyValueStorage[$"CaptureFile:{Path.GetFileName(fileName)}"] = path;
+    }
+
     /// <summary>
-    /// Prepares a local NuGet package channel for source-build E2E tests.
-    /// Copies packed Aspire.*.nupkg files to a workspace-local directory and extracts the SDK version.
-    /// Returns <c>null</c> for non-SourceBuild modes.
+    /// Prepares local channel metadata for source-build E2E tests.
+    /// Validates that the expected packed Aspire.*.nupkg files exist and extracts the SDK version.
+    /// Returns <c>null</c> when the CLI install strategy does not use a local hive archive.
     /// </summary>
     /// <param name="repoRoot">The repo root directory containing artifacts/.</param>
-    /// <param name="workspace">The temporary workspace where the local channel directory will be created.</param>
-    /// <param name="installMode">The detected install mode.</param>
+    /// <param name="strategy">The detected CLI install strategy.</param>
     /// <param name="requiredPackagePrefixes">
     /// Optional additional package name prefixes to validate beyond <c>Aspire.Hosting.</c>.
     /// For example, <c>["Aspire.Hosting.CodeGeneration.TypeScript.", "Aspire.Hosting.JavaScript."]</c>.
     /// </param>
-    /// <returns>A <see cref="LocalChannelInfo"/> with the packages path and SDK version, or <c>null</c> for non-SourceBuild.</returns>
+    /// <returns>A <see cref="LocalChannelInfo"/> with the SDK version, or <c>null</c> when the strategy is not local hive.</returns>
     internal static LocalChannelInfo? PrepareLocalChannel(
         string repoRoot,
-        TemporaryWorkspace workspace,
-        DockerInstallMode installMode,
+        CliInstallStrategy strategy,
         string[]? requiredPackagePrefixes = null)
     {
-        if (installMode != DockerInstallMode.SourceBuild)
+        if (strategy.Mode != CliInstallMode.LocalHive)
         {
             return null;
         }
 
-        var shippingPackagesDirectory = Path.Combine(repoRoot, "artifacts", "packages", "Debug", "Shipping");
-        if (!Directory.Exists(shippingPackagesDirectory))
+        return PrepareLocalChannelCore(repoRoot, requiredPackagePrefixes);
+    }
+
+    private static LocalChannelInfo PrepareLocalChannelCore(
+        string repoRoot,
+        string[]? requiredPackagePrefixes)
+    {
+        var shippingPackagesDirectory = new[]
+        {
+            Path.Combine(repoRoot, "artifacts", "packages", "Debug", "Shipping"),
+            Path.Combine(repoRoot, "artifacts", "packages", "Release", "Shipping")
+        }
+        .FirstOrDefault(directory => Directory.Exists(directory) &&
+            Directory.EnumerateFiles(directory, "Aspire*.nupkg", SearchOption.TopDirectoryOnly).Any());
+
+        if (shippingPackagesDirectory is null)
         {
             throw new InvalidOperationException("Local source-built E2E tests require packed Aspire packages. Run './build.sh --bundle --pack' first.");
         }
 
-        var packageFiles = Directory.EnumerateFiles(shippingPackagesDirectory, "Aspire*.nupkg", SearchOption.TopDirectoryOnly)
+        var allPackageFiles = Directory.EnumerateFiles(shippingPackagesDirectory, "Aspire*.nupkg", SearchOption.TopDirectoryOnly)
             .Where(file => !file.EndsWith(".symbols.nupkg", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        var sdkVersion = allPackageFiles
+            .Select(Path.GetFileName)
+            .Where(static fileName => fileName is not null && Regex.IsMatch(fileName, @"^Aspire\.Hosting\.\d+\.\d+\.\d+.*\.nupkg$", RegexOptions.IgnoreCase))
+            .Select(static fileName => fileName!["Aspire.Hosting.".Length..^".nupkg".Length])
+            .OrderDescending(StringComparer.Ordinal)
+            .FirstOrDefault();
+
+        if (string.IsNullOrEmpty(sdkVersion))
+        {
+            throw new InvalidOperationException("Local source-built E2E tests could not determine the Aspire SDK version from packed packages.");
+        }
+
+        var packageFiles = allPackageFiles
+            .Where(file => file.EndsWith($"{sdkVersion}.nupkg", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         if (!packageFiles.Any(file => Path.GetFileName(file).StartsWith("Aspire.Hosting.", StringComparison.OrdinalIgnoreCase)))
@@ -762,26 +724,7 @@ internal static class CliE2ETestHelpers
             }
         }
 
-        var localChannelPackagesPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire-local", "packages");
-        Directory.CreateDirectory(localChannelPackagesPath);
-
-        foreach (var packageFile in packageFiles)
-        {
-            File.Copy(packageFile, Path.Combine(localChannelPackagesPath, Path.GetFileName(packageFile)), overwrite: true);
-        }
-
-        var sdkVersion = packageFiles
-            .Select(Path.GetFileName)
-            .FirstOrDefault(fileName => fileName is not null && Regex.IsMatch(fileName, @"^Aspire\.Hosting\.\d+\.\d+\.\d+.*\.nupkg$", RegexOptions.IgnoreCase))
-            ?.Replace("Aspire.Hosting.", string.Empty, StringComparison.OrdinalIgnoreCase)
-            ?.Replace(".nupkg", string.Empty, StringComparison.OrdinalIgnoreCase);
-
-        if (string.IsNullOrEmpty(sdkVersion))
-        {
-            throw new InvalidOperationException("Local source-built E2E tests could not determine the Aspire SDK version from packed packages.");
-        }
-
-        return new LocalChannelInfo(localChannelPackagesPath, sdkVersion);
+        return new LocalChannelInfo(sdkVersion);
     }
 
     internal static void WriteLocalChannelSettings(string projectRoot, string sdkVersion)
@@ -803,19 +746,8 @@ internal static class CliE2ETestHelpers
     /// <summary>
     /// Information about a local NuGet package channel for source-build E2E tests.
     /// </summary>
-    /// <param name="PackagesPath">The directory path containing the local .nupkg files.</param>
     /// <param name="SdkVersion">The Aspire SDK version extracted from the package filenames.</param>
-    internal sealed record LocalChannelInfo(string PackagesPath, string SdkVersion);
-
-    private static void RegisterCaptureFile(string fileName, string path)
-    {
-        if (TestContext.Current is null)
-        {
-            return;
-        }
-
-        TestContext.Current.KeyValueStorage[$"CaptureFile:{Path.GetFileName(fileName)}"] = path;
-    }
+    internal sealed record LocalChannelInfo(string SdkVersion);
 
     /// <summary>
     /// Copies a directory to testresults/workspaces/{testName}/{label} for CI artifact upload.

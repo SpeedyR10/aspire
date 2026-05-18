@@ -584,7 +584,7 @@ public sealed class TelemetryExportService
                     TimeUnixNano = OtlpHelpers.DateTimeToUnixNanoseconds(value.End),
                     Count = histogramValue.Count,
                     Sum = histogramValue.Sum,
-                    BucketCounts = histogramValue.Values.Select(v => v.ToString(CultureInfo.InvariantCulture)).ToArray(),
+                    BucketCounts = histogramValue.Values,
                     ExplicitBounds = histogramValue.ExplicitBounds,
                     Exemplars = value.HasExemplars ? ConvertExemplars(value.Exemplars) : null
                 };
@@ -773,6 +773,7 @@ public sealed class TelemetryExportService
                         c => c.Name,
                         c => new ResourceCommandJson
                         {
+                            DisplayName = c.GetDisplayName(),
                             Description = c.GetDisplayDescription()
                         })
                 : null,

@@ -90,7 +90,7 @@ public class ReleaseScriptShellTests(ITestOutputHelper testOutput)
 
         result.EnsureSuccessful();
         // In dry-run mode, the script outputs a download descriptor like:
-        // [DRY RUN] Would download aspire-cli-linux-x64.tar.gz from 'ga/daily'
+        // [DRY RUN] Would download aspire-cli-linux-x64.tar.gz from the stable channel
         Assert.Contains("[DRY RUN] Would download", result.Output);
     }
 
@@ -107,9 +107,9 @@ public class ReleaseScriptShellTests(ITestOutputHelper testOutput)
     }
 
     [Theory]
-    [InlineData("dev", "from 'daily'")]
-    [InlineData("staging", "from 'rc/daily'")]
-    [InlineData("release", "from 'ga/daily'")]
+    [InlineData("dev", "from the daily channel")]
+    [InlineData("staging", "from the staging channel")]
+    [InlineData("release", "from the stable channel")]
     public async Task QualityVariants_AreRecognized(string quality, string expectedSource)
     {
         using var env = new TestEnvironment();
@@ -119,6 +119,9 @@ public class ReleaseScriptShellTests(ITestOutputHelper testOutput)
         result.EnsureSuccessful();
         Assert.Contains("[DRY RUN]", result.Output);
         Assert.Contains(expectedSource, result.Output);
+        Assert.DoesNotContain("dotnet", result.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ga/daily", result.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("rc/daily", result.Output, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -165,5 +168,92 @@ public class ReleaseScriptShellTests(ITestOutputHelper testOutput)
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains("--quality dev", result.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("dev")]
+    [InlineData("staging")]
+    [InlineData("release")]
+    public async Task DryRun_DoesNotCreateGlobalAspireConfigJson(string quality)
+    {
+        using var env = new TestEnvironment();
+        using var cmd = new ScriptToolCommand(s_scriptPath, env, _testOutput);
+
+        var result = await cmd.ExecuteAsync("--dry-run", "--quality", quality);
+
+        result.EnsureSuccessful();
+
+        var globalConfig = Path.Combine(env.MockHome, ".aspire", "aspire.config.json");
+        Assert.False(
+            File.Exists(globalConfig),
+            $"Release script must not write {globalConfig}; channel is baked into the CLI binary, not stored globally.");
+
+        // The script should not even plan a global-channel write in its dry-run output.
+        Assert.DoesNotContain("aspire.config.json", result.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Install_DryRun_DoesNotWriteGlobalChannelField()
+    {
+        // Install scripts must not write a global aspire.config.json — the channel
+        // is baked into the CLI binary at build time and read via
+        // IdentityChannelReader. A global channel field would shadow the baked value.
+        // Asserts both dry-run stdout shape and absence of the global config file.
+        using var env = new TestEnvironment();
+        using var cmd = new ScriptToolCommand(s_scriptPath, env, _testOutput);
+
+        var result = await cmd.ExecuteAsync("--dry-run", "--quality", "release", "--skip-path");
+
+        result.EnsureSuccessful();
+        Assert.DoesNotContain("config set channel", result.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"channel\"", result.Output);
+
+        var configPath = Path.Combine(env.MockHome, ".aspire", "aspire.config.json");
+        Assert.False(
+            File.Exists(configPath),
+            $"install.sh must not create global aspire.config.json; found at {configPath}.");
+    }
+
+    // Under --dry-run the release-route script must NOT write the script-route
+    // sidecar at <prefix>/.aspire-install.json. The describe-but-do-not-do
+    // contract requires the script to print a DRYRUN message naming the path it
+    // would write, then return without touching the filesystem. A previous
+    // implementation wrote the sidecar even under --dry-run, which can leave a
+    // stale source=script marker visible to BundleService when the install
+    // was never actually performed.
+    [Fact]
+    public async Task DryRun_DoesNotWriteScriptRouteSidecar_AndAnnouncesPath()
+    {
+        using var env = new TestEnvironment();
+        using var cmd = new ScriptToolCommand(s_scriptPath, env, _testOutput);
+        var result = await cmd.ExecuteAsync("--dry-run", "--quality", "release", "--skip-path");
+
+        result.EnsureSuccessful();
+
+        var sidecarPath = Path.Combine(env.MockHome, ".aspire", "bin", ".aspire-install.json");
+        Assert.Contains($"DRYRUN: would write route sidecar to: {sidecarPath}", result.Output);
+        Assert.False(
+            File.Exists(sidecarPath),
+            $"Expected no sidecar to be written under --dry-run, but found one at {sidecarPath}");
+    }
+
+    // The release-route script must not mutate route sidecars under --dry-run,
+    // regardless of the configured quality. This guards the dry-run contract on
+    // the 'dev' quality path, which historically took a slightly different
+    // code branch in the script body.
+    [Fact]
+    public async Task DryRun_DevQuality_DoesNotWriteScriptRouteSidecar()
+    {
+        using var env = new TestEnvironment();
+        using var cmd = new ScriptToolCommand(s_scriptPath, env, _testOutput);
+        var result = await cmd.ExecuteAsync("--dry-run", "--quality", "dev", "--skip-path");
+
+        result.EnsureSuccessful();
+
+        var sidecarPath = Path.Combine(env.MockHome, ".aspire", "bin", ".aspire-install.json");
+        Assert.Contains($"DRYRUN: would write route sidecar to: {sidecarPath}", result.Output);
+        Assert.False(
+            File.Exists(sidecarPath),
+            $"Expected no sidecar to be written under --dry-run, but found one at {sidecarPath}");
     }
 }

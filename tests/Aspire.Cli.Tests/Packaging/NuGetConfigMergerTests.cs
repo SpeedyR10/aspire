@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.InternalTesting;
 using System.Xml.Linq;
 using System.Xml;
 using Aspire.Cli.Packaging;
-using Aspire.Cli.NuGet;
+using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
 
 namespace Aspire.Cli.Tests.Packaging;
@@ -24,26 +24,6 @@ public class NuGetConfigMergerTests
         var path = Path.Combine(dir.FullName, "nuget.config");
         await File.WriteAllTextAsync(path, content);
         return new FileInfo(path);
-    }
-
-    private sealed class FakeNuGetPackageCache : INuGetPackageCache
-    {
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetTemplatePackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
-        {
-            _ = workingDirectory; _ = prerelease; _ = nugetConfigFile; _ = cancellationToken; return Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        }
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetIntegrationPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
-        {
-            _ = workingDirectory; _ = prerelease; _ = nugetConfigFile; _ = cancellationToken; return Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        }
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetCliPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
-        {
-            _ = workingDirectory; _ = prerelease; _ = nugetConfigFile; _ = cancellationToken; return Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        }
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetPackagesAsync(DirectoryInfo workingDirectory, string packageId, Func<string, bool>? filter, bool prerelease, FileInfo? nugetConfigFile, bool useCache, CancellationToken cancellationToken)
-        {
-            _ = workingDirectory; _ = packageId; _ = filter; _ = prerelease; _ = nugetConfigFile; _ = useCache; _ = cancellationToken; return Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        }
     }
 
     private static PackageChannel CreateChannel(PackageMapping[] mappings) => PackageChannel.CreateExplicitChannel("test", PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache());
@@ -542,6 +522,105 @@ public class NuGetConfigMergerTests
         
         // There should be two packageSource elements (nuget.org and valid.example)
         Assert.Equal(2, psm.Elements("packageSource").Count());
+    }
+
+    [Fact]
+    public async Task CreateOrUpdateAsync_RemovesOldPrHive_WhenSwitchingBetweenPrHives()
+    {
+        // Reproduces the scenario reported on `aspire update --channel pr-<new>` when the
+        // previous channel was also a PR hive: switching between two `~/.aspire/hives/pr-*/packages`
+        // sources must remove the old source from <packageSources>, not just from
+        // <packageSourceMapping>. If the stale path lingers, subsequent `dotnet restore`
+        // fails with NU1301 when that hive directory has since been deleted/cleaned.
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var root = workspace.WorkspaceRoot;
+
+        const string oldHive = "/Users/midenn/.aspire/hives/pr-17182/packages";
+        const string newHive = "/Users/midenn/.aspire/hives/pr-17192/packages";
+
+        await WriteConfigAsync(root,
+            $"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <configuration>
+                <packageSources>
+                    <add key="{oldHive}" value="{oldHive}" />
+                    <add key="https://api.nuget.org/v3/index.json" value="https://api.nuget.org/v3/index.json" />
+                </packageSources>
+                <packageSourceMapping>
+                    <packageSource key="{oldHive}">
+                        <package pattern="Aspire*" />
+                    </packageSource>
+                    <packageSource key="https://api.nuget.org/v3/index.json">
+                        <package pattern="*" />
+                    </packageSource>
+                </packageSourceMapping>
+            </configuration>
+            """);
+
+        var mappings = new[]
+        {
+            new PackageMapping("Aspire*", newHive),
+            new PackageMapping("*", "https://api.nuget.org/v3/index.json"),
+        };
+
+        var channel = CreateChannel(mappings);
+        await NuGetConfigMerger.CreateOrUpdateAsync(root, channel).DefaultTimeout();
+
+        var xml = XDocument.Load(Path.Combine(root.FullName, "nuget.config"));
+        var packageSources = xml.Root!.Element("packageSources")!;
+
+        Assert.DoesNotContain(packageSources.Elements("add"),
+            e => string.Equals((string?)e.Attribute("value"), oldHive, StringComparison.Ordinal));
+        Assert.Contains(packageSources.Elements("add"),
+            e => string.Equals((string?)e.Attribute("value"), newHive, StringComparison.Ordinal));
+
+        var psm = xml.Root!.Element("packageSourceMapping")!;
+        Assert.DoesNotContain(psm.Elements("packageSource"),
+            ps => string.Equals((string?)ps.Attribute("key"), oldHive, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CreateOrUpdateAsync_RemovesOldPrHive_WhenItHasNoMappingElement()
+    {
+        // This is the *real* shape of the regression reported on pr-17192 follow-up:
+        // the AppHost-level nuget.config had pr-17182 listed in <packageSources> but the
+        // <packageSourceMapping> contained no entry for that source at all. Because
+        // RemoveEmptyPackageSourceElements only cleans up entries whose mapping element
+        // became empty *during the merge*, a source that never had a mapping element
+        // survives the merge and breaks subsequent `dotnet restore` once the hive
+        // directory is deleted.
+        using var workspace = TemporaryWorkspace.Create(_outputHelper);
+        var root = workspace.WorkspaceRoot;
+
+        const string oldHive = "/Users/midenn/.aspire/hives/pr-17182/packages";
+        const string newHive = "/Users/midenn/.aspire/hives/pr-17192/packages";
+
+        await WriteConfigAsync(root,
+            $"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <configuration>
+                <packageSources>
+                    <add key="{oldHive}" value="{oldHive}" />
+                </packageSources>
+                <packageSourceMapping>
+                </packageSourceMapping>
+            </configuration>
+            """);
+
+        var mappings = new[]
+        {
+            new PackageMapping("Aspire*", newHive),
+            new PackageMapping("*", "https://api.nuget.org/v3/index.json"),
+        };
+
+        var channel = CreateChannel(mappings);
+        await NuGetConfigMerger.CreateOrUpdateAsync(root, channel).DefaultTimeout();
+
+        var xml = XDocument.Load(Path.Combine(root.FullName, "nuget.config"));
+        var packageSources = xml.Root!.Element("packageSources")!;
+
+        Assert.DoesNotContain(packageSources.Elements("add"),
+            e => string.Equals((string?)e.Attribute("value"), oldHive, StringComparison.Ordinal));
     }
 
     [Fact]

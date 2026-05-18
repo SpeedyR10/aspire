@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Aspire.Hosting.Dcp.Process;
 using Aspire.Hosting.Resources;
+using Aspire.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -214,12 +215,12 @@ internal sealed partial class DcpDependencyCheck : IDcpDependencyCheckService
         messageBuilder.AppendFormat(CultureInfo.InvariantCulture, InteractionStrings.ContainerRuntimeUnhealthyMessage, containerRuntime);
         string? linkUrl = null;
 
-        if (string.Equals(containerRuntime, "docker", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(containerRuntime, KnownContainerRuntimes.Docker, StringComparison.OrdinalIgnoreCase))
         {
             messageBuilder.Append(InteractionStrings.ContainerRuntimeDockerAdvice);
             linkUrl = "https://docs.docker.com/desktop/use-desktop/resource-saver/";
         }
-        else if (string.Equals(containerRuntime, "podman", StringComparison.OrdinalIgnoreCase))
+        else if (string.Equals(containerRuntime, KnownContainerRuntimes.Podman, StringComparison.OrdinalIgnoreCase))
         {
             messageBuilder.Append(InteractionStrings.ContainerRuntimePodmanAdvice);
         }
@@ -237,7 +238,7 @@ internal sealed partial class DcpDependencyCheck : IDcpDependencyCheckService
         if (string.IsNullOrEmpty(containerRuntime))
         {
             // Default runtime is Docker
-            containerRuntime = "docker";
+            containerRuntime = KnownContainerRuntimes.Docker;
         }
         var installed = dcpInfo.Containers?.Installed ?? false;
         var running = dcpInfo.Containers?.Running ?? false;
@@ -245,12 +246,12 @@ internal sealed partial class DcpDependencyCheck : IDcpDependencyCheckService
 
         if (!installed)
         {
-            logger.LogWarning("Container runtime '{Runtime}' could not be found. See https://aka.ms/dotnet/aspire/containers for more details on supported container runtimes.", containerRuntime);
+            logger.LogWarning("Container runtime '{Runtime}' could not be found. See https://aka.ms/aspire/containers for more details on supported container runtimes.", containerRuntime);
 
             logger.LogDebug("The error from the container runtime check was: {Error}", error);
             if (throwIfUnhealthy)
             {
-                throw new DistributedApplicationException($"Container runtime '{containerRuntime}' could not be found. See https://aka.ms/dotnet/aspire/containers for more details on supported container runtimes.");
+                throw new DistributedApplicationException($"Container runtime '{containerRuntime}' could not be found. See https://aka.ms/aspire/containers for more details on supported container runtimes.");
             }
         }
         else if (!running)

@@ -73,7 +73,7 @@
         <note />
       </trans-unit>
       <trans-unit id="Description">
-        <source>Update integrations in the Aspire project (Preview)</source>
+        <source>Update integrations in the Aspire project</source>
         <target state="needs-review-translation">Aspire projesindeki tümleştirme güncelleştirmelerini yapın. (Önizleme)</target>
         <note />
       </trans-unit>
@@ -105,6 +105,11 @@
       <trans-unit id="FailedFetchItemsAndPropertiesFormat">
         <source>Failed to fetch items and properties for project: {0}</source>
         <target state="translated">Proje için öğeler ve özellikler getirilemedi: {0}</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="FailedToRestoreAfterUpdateFormat">
+        <source>Failed to restore packages for project {0} after update.</source>
+        <target state="new">Failed to restore packages for project {0} after update.</target>
         <note />
       </trans-unit>
       <trans-unit id="FailedUpdatePackageReferenceFormat">
@@ -157,6 +162,16 @@
         <target state="translated">'{0}' yükleme dizinine yazılamıyor. Lütfen güncellemeyi yükseltilmiş izinlerle (örneğin Linux/macOS'ta sudo kullanarak) çalıştırın.</target>
         <note />
       </trans-unit>
+      <trans-unit id="NuGetConfigDirOptionDescription">
+        <source>Directory to create or update the NuGet.config file in</source>
+        <target state="new">Directory to create or update the NuGet.config file in</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="PackageNotFoundInChannelWarningFormat">
+        <source>No package found with ID '{0}' in channel '{1}'. Skipping.</source>
+        <target state="new">No package found with ID '{0}' in channel '{1}'. Skipping.</target>
+        <note />
+      </trans-unit>
       <trans-unit id="PackageReferenceNoIdentity">
         <source>Package reference does not have Identity.</source>
         <target state="translated">Paket başvurusunda Kimlik yok.</target>
@@ -173,7 +188,7 @@
         <note />
       </trans-unit>
       <trans-unit id="ProjectArgumentDescription">
-        <source>The path to the Aspire AppHost project file</source>
+        <source>The path to the Aspire AppHost project file or a directory to search</source>
         <target state="needs-review-translation">Aspire AppHost proje dosyasının yolu.</target>
         <note />
       </trans-unit>
@@ -217,6 +232,11 @@
         <target state="translated">Kullanımdan kaldırılan Aspire.Hosting.AppHost paket başvurusu kaldırıldı</target>
         <note />
       </trans-unit>
+      <trans-unit id="RestoringPackagesAfterUpdate">
+        <source>Restoring packages...</source>
+        <target state="new">Restoring packages...</target>
+        <note />
+      </trans-unit>
       <trans-unit id="RetainedFeedFormat">
         <source>Retained: {0}</source>
         <target state="translated">Korundu: {0}</target>
@@ -255,6 +275,11 @@
       <trans-unit id="WhichDirectoryNuGetConfigPrompt">
         <source>Which directory for NuGet.config file?</source>
         <target state="translated">NuGet.config dosyası için hangi dizin kullanılsın?</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="YesOptionDescription">
+        <source>Automatically confirm all update prompts without asking</source>
+        <target state="new">Automatically confirm all update prompts without asking</target>
         <note />
       </trans-unit>
     </body>

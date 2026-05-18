@@ -4,7 +4,6 @@
 using Aspire.Cli.EndToEnd.Tests.Helpers;
 using Aspire.Cli.Resources;
 using Aspire.Cli.Tests.Utils;
-using Aspire.TestUtilities;
 using Hex1b.Automation;
 using Xunit;
 
@@ -17,11 +16,11 @@ namespace Aspire.Cli.EndToEnd.Tests;
 public sealed class WaitCommandTests(ITestOutputHelper output)
 {
     [Fact]
-    [QuarantinedTest("https://github.com/microsoft/aspire/issues/14993")]
+    [ActiveIssue("https://github.com/microsoft/aspire/issues/14993")]
     public async Task CreateStartWaitAndStopAspireProject()
     {
         var repoRoot = CliE2ETestHelpers.GetRepoRoot();
-        var strategy = CliInstallStrategy.Detect();
+        var strategy = CliInstallStrategy.Detect(output.WriteLine);
 
         var workspace = TemporaryWorkspace.Create(output);
 
@@ -62,7 +61,7 @@ public sealed class WaitCommandTests(ITestOutputHelper output)
         // Stop the AppHost using aspire stop
         await auto.TypeAsync("aspire stop");
         await auto.EnterAsync();
-        await auto.WaitUntilTextAsync(StopCommandStrings.AppHostStoppedSuccessfully, timeout: TimeSpan.FromMinutes(1));
+        await auto.WaitUntilAppHostStoppedSuccessfullyAsync(timeout: TimeSpan.FromMinutes(1));
         await auto.WaitForSuccessPromptAsync(counter);
 
         // Exit the shell
